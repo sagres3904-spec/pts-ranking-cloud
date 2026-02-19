@@ -298,6 +298,7 @@ def parse_pts_page(html: str) -> pd.DataFrame:
                 "close_price": close_price,
                 "pts_price": pts_price,
                 "pct_raw": pct_raw,
+                "is_stop_high": ("S" in (th_text + " " + " ".join([td.get_text(" ", strip=True) for td in tds]))),
             }
         )
 
@@ -378,7 +379,10 @@ if st.button("取得して表示"):
         )
 
         df2 = df.dropna(subset=["pct", "volume"]).copy()
-        df2 = df2[(df2["pct"] >= float(pct_min_val)) & (df2["volume"] >= int(vol_min_val))].copy()
+        df2 = df2[
+        (df2["pct"] >= float(pct_min_val)) &
+        ((df2["volume"] >= int(vol_min_val)) | (df2["is_stop_high"] == True))
+        ].copy()
 
         df2 = attach_disclosures(df2, debug=debug)
 
@@ -447,4 +451,5 @@ else:
 
 
         
+
 
