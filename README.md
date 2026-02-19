@@ -1,1 +1,2 @@
-# pts-ranking-cloud
+# pts-watcher
+PTS監視スクリプト
