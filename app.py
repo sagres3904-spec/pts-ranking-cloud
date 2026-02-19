@@ -171,6 +171,10 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         st.write("【診断】Yanoshin件数 today:", int(len(td_today)))
         st.write("【診断】Yanoshin件数 yesterday:", int(len(td_yesterday)))
         st.write("【診断】Yanoshin結合後件数（重複除去後）:", int(len(td)))
+        st.write("【診断】pubdateサンプル先頭10:", td["pubdate"].dropna().head(10).tolist())
+        st.write("【診断】pub_date_only日付別件数:", td["pub_date_only"].value_counts(dropna=False).to_dict())
+        st.write("【診断】取得URL:", url_today, url_yesterday)
+
         if len(td) > 0:
             uniq_dates = sorted(
                 set([d for d in td["pub_date_only"].tolist() if isinstance(d, datetime.date)]),
@@ -440,5 +444,6 @@ if st.button("取得して表示"):
         st.error(f"取得に失敗しました: {e}")
 else:
     st.info("条件を設定して「取得して表示」を押してください。")
+
 
         
