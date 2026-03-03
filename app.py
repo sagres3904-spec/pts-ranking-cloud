@@ -403,6 +403,10 @@ if st.button("取得して表示"):
             raise ValueError(f"最大ページ数が解釈できません: {max_pages}")
 
         df, last_page = crawl_until_below_threshold(
+            # 【追加】出来高で絞り込み（ストップ高は例外）＋出来高で並べる
+            df2 = df.dropna(subset=["pct", "volume"]).copy()
+            df2 = df2[(df2["pct"] >= float(pct_min)) & ((df2["volume"] >= int(vol_min)) | (df2.get("is_stop_high", False) == True))].copy()
+            df2 = df2.sort_values(by=["volume", "pct"], ascending=[False, False])
             pct_threshold=float(pct_min_val),
             max_pages=int(max_pages_val),
             debug=debug,
@@ -488,6 +492,7 @@ else:
 
 
         
+
 
 
 
