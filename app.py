@@ -88,76 +88,12 @@ def _extract_date_from_pubdate(pubdate: str) -> Optional[datetime.date]:
 
 
 def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame:
-    url_recent = "https://webapi.yanoshin.jp/webapi/tdnet/list/recent.json2?limit=2000"
+        url_today = "https://webapi.yanoshin.jp/webapi/tdnet/list/today.json2?limit=2000"
+    url_yesterday = "https://webapi.yanoshin.jp/webapi/tdnet/list/yesterday.json2?limit=2000"
 
-
-    def _fetch(url: str, source_tag: str) -> pd.DataFrame:
-        r = requests.get(url, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-
-        items = data.get("items")
-        if items is None:
-            items = data.get("result")
-        if items is None:
-            items = data
-        if not isinstance(items, list):
-            items = []
-
-        rows = []
-        for it in items:
-            # recent / today / yesterday で項目名が違うことがあるため、候補を順に拾う
-            raw_code = (
-                it.get("company_code")
-                or it.get("code")
-                or it.get("CompanyCode")
-                or it.get("Company_Code")
-            )
-
-            raw_title = (
-                it.get("title")
-                or it.get("Title")
-                or it.get("subject")
-                or it.get("Subject")
-            )
-
-            raw_url = (
-                it.get("document_url")
-                or it.get("documentUrl")
-                or it.get("pdf_url")
-                or it.get("pdfUrl")
-                or it.get("url")
-                or it.get("Url")
-            )
-
-            raw_pubdate = (
-                it.get("pubdate")
-                or it.get("Pubdate")
-                or it.get("date")
-                or it.get("Date")
-            )
-
-            code = _normalize_company_code(raw_code)
-            code = _safe_text(code).zfill(4)
-
-            title = _safe_text(raw_title)
-            doc_url = _safe_text(raw_url)
-            pubdate = _safe_text(raw_pubdate)
-
-            rows.append(
-                {
-                    "code": code,
-                    "source_tag": source_tag,
-                    "title": title,
-                    "document_url": doc_url,
-                    "pubdate": pubdate,
-                }
-            )
-
-        if len(rows) == 0:
-            return pd.DataFrame(columns=["code", "source_tag", "title", "document_url", "pubdate"])
-        return pd.DataFrame(rows)
-    td = _fetch(url_recent, source_tag="recent")
+    td_today = _fetch(url_today, source_tag="today")
+    td_yesterday = _fetch(url_yesterday, source_tag="yesterday")
+    td = pd.concat([td_today, td_yesterday], ignore_index=True)
     td_today = td  # 診断表示互換のため（なくてもOK）
     td_yesterday = td
 
@@ -203,7 +139,7 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         st.write("【診断】Yanoshin結合後件数（重複除去後）:", int(len(td)))
         st.write("【診断】pubdateサンプル先頭10:", td["pubdate"].dropna().head(10).tolist())
         st.write("【診断】pub_date_only日付別件数:", td["pub_date_only"].value_counts(dropna=False).to_dict())
-        st.write("【診断】取得URL:", url_recent)
+        st.write("【診断】取得URL:", url_today, url_yesterday)
                 # 【追加診断】捨てている理由を可視化
         st.write("【診断】td columns:", list(td.columns) if len(td) > 0 else [])
         st.write("【診断】td sample code/url/pubdate:",
@@ -509,6 +445,7 @@ else:
 
 
         
+
 
 
 
