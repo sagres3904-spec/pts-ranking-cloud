@@ -411,7 +411,7 @@ if st.button("取得して表示"):
         df2 = df.dropna(subset=["pct", "volume"]).copy()
         # --- ここから追加：ストップ高フラグが無ければFalseで作る ---
         if "is_stop_high" not in df2.columns:
-        df2["is_stop_high"] = False
+            df2["is_stop_high"] = False
         # --- ここまで追加 ---
         # --- ここから追加：並び順（ストップ高→出来高→上昇率） ---
         df2 = df2.sort_values(by=["is_stop_high", "volume", "pct"], ascending=[False, False, False])
@@ -488,6 +488,7 @@ else:
 
 
         
+
 
 
 
