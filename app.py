@@ -91,7 +91,7 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     url_recent = "https://webapi.yanoshin.jp/webapi/tdnet/list/recent.json2?limit=2000"
 
 
-        def _fetch(url: str, source_tag: str) -> pd.DataFrame:
+    def _fetch(url: str, source_tag: str) -> pd.DataFrame:
         r = requests.get(url, timeout=20)
         r.raise_for_status()
         data = r.json()
@@ -488,6 +488,7 @@ else:
 
 
         
+
 
 
 
