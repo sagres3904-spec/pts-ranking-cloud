@@ -204,6 +204,15 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         st.write("【診断】pubdateサンプル先頭10:", td["pubdate"].dropna().head(10).tolist())
         st.write("【診断】pub_date_only日付別件数:", td["pub_date_only"].value_counts(dropna=False).to_dict())
         st.write("【診断】取得URL:", url_recent)
+                # 【追加診断】捨てている理由を可視化
+        st.write("【診断】td columns:", list(td.columns) if len(td) > 0 else [])
+        st.write("【診断】td sample code/url/pubdate:",
+                 td[["code", "document_url", "pubdate"]].head(5).to_dict("records") if len(td) > 0 else [])
+        st.write("【診断】空の件数(code/url):",
+                 {
+                     "code_empty": int((td["code"].astype(str).str.strip() == "").sum()) if "code" in td.columns else -1,
+                     "url_empty": int((td["document_url"].astype(str).str.strip() == "").sum()) if "document_url" in td.columns else -1,
+                 } if len(td) > 0 else {})
 
         if len(td) > 0:
             uniq_dates = sorted(
@@ -458,6 +467,9 @@ if st.button("取得して表示"):
                 return st.column_config.LinkColumn(colname, display_text="PDF")
             except TypeError:
                 return st.column_config.LinkColumn(colname)
+        # 【強制】表示直前にもう一回だけ出来高フィルタ（これで100は消える）
+        df2 = df2[(df2["volume"] >= int(vol_min)) | (df2.get("is_stop_high", False) == True)].copy()
+        df2 = df2.sort_values(by=["is_stop_high", "volume", "pct"], ascending=[False, False, False]) 
 
         st.dataframe(
             df_show,
@@ -497,6 +509,7 @@ else:
 
 
         
+
 
 
 
