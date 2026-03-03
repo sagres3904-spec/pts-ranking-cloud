@@ -106,12 +106,42 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
 
         rows = []
         for it in items:
-            code = _normalize_company_code(it.get("company_code"))
+                        raw_code = (
+                it.get("company_code")
+                or it.get("code")
+                or it.get("CompanyCode")
+                or it.get("Company_Code")
+            )
+
+            raw_title = (
+                it.get("title")
+                or it.get("Title")
+                or it.get("subject")
+                or it.get("Subject")
+            )
+
+            raw_url = (
+                it.get("document_url")
+                or it.get("documentUrl")
+                or it.get("pdf_url")
+                or it.get("pdfUrl")
+                or it.get("url")
+                or it.get("Url")
+            )
+
+            raw_pubdate = (
+                it.get("pubdate")
+                or it.get("Pubdate")
+                or it.get("date")
+                or it.get("Date")
+            )
+
+            code = _normalize_company_code(raw_code)
             code = _safe_text(code).zfill(4)
 
-            title = _safe_text(it.get("title", ""))
-            doc_url = _safe_text(it.get("document_url", ""))
-            pubdate = _safe_text(it.get("pubdate", ""))
+            title = _safe_text(raw_title)
+            doc_url = _safe_text(raw_url)
+            pubdate = _safe_text(raw_pubdate)
 
             rows.append(
                 {
@@ -379,6 +409,13 @@ if st.button("取得して表示"):
         )
 
         df2 = df.dropna(subset=["pct", "volume"]).copy()
+        # --- ここから追加：ストップ高フラグが無ければFalseで作る ---
+        if "is_stop_high" not in df2.columns:
+        df2["is_stop_high"] = False
+        # --- ここまで追加 ---
+        # --- ここから追加：並び順（ストップ高→出来高→上昇率） ---
+        df2 = df2.sort_values(by=["is_stop_high", "volume", "pct"], ascending=[False, False, False])
+        # --- ここまで追加 ---
         df2 = df2[
         (df2["pct"] >= float(pct_min_val)) &
         ((df2["volume"] >= int(vol_min_val)) | (df2["is_stop_high"] == True))
@@ -451,5 +488,6 @@ else:
 
 
         
+
 
 
