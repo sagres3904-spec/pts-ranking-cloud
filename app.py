@@ -91,7 +91,7 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     url_recent = "https://webapi.yanoshin.jp/webapi/tdnet/list/recent.json2?limit=2000"
 
 
-    def _fetch(url: str, source_tag: str) -> pd.DataFrame:
+        def _fetch(url: str, source_tag: str) -> pd.DataFrame:
         r = requests.get(url, timeout=20)
         r.raise_for_status()
         data = r.json()
@@ -106,7 +106,8 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
 
         rows = []
         for it in items:
-                        raw_code = (
+            # recent / today / yesterday で項目名が違うことがあるため、候補を順に拾う
+            raw_code = (
                 it.get("company_code")
                 or it.get("code")
                 or it.get("CompanyCode")
@@ -156,7 +157,6 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         if len(rows) == 0:
             return pd.DataFrame(columns=["code", "source_tag", "title", "document_url", "pubdate"])
         return pd.DataFrame(rows)
-
     td = _fetch(url_recent, source_tag="recent")
     td_today = td  # 診断表示互換のため（なくてもOK）
     td_yesterday = td
@@ -488,6 +488,7 @@ else:
 
 
         
+
 
 
 
