@@ -88,7 +88,6 @@ def _extract_date_from_pubdate(pubdate: str) -> Optional[datetime.date]:
 
 
 def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame:
-    def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame:
     url_today = "https://webapi.yanoshin.jp/webapi/tdnet/list/today.json2?limit=2000"
     url_yesterday = "https://webapi.yanoshin.jp/webapi/tdnet/list/yesterday.json2?limit=2000"
 
@@ -107,7 +106,7 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
 
         rows = []
         for it in items:
-            # 形式の違いに強くする（キー名がズレても拾う）
+            # キー名がズレても拾えるように候補を並べる
             raw_code = it.get("company_code") or it.get("code") or it.get("CompanyCode") or it.get("Company_Code")
             raw_title = it.get("title") or it.get("Title") or it.get("subject") or it.get("Subject")
             raw_url = (
@@ -120,9 +119,7 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             )
             raw_pubdate = it.get("pubdate") or it.get("Pubdate") or it.get("date") or it.get("Date")
 
-            code = _normalize_company_code(raw_code)
-            code = _safe_text(code).zfill(4)
-
+            code = _safe_text(_normalize_company_code(raw_code)).zfill(4)
             title = _safe_text(raw_title)
             doc_url = _safe_text(raw_url)
             pubdate = _safe_text(raw_pubdate)
@@ -151,14 +148,13 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         td["title"] = td["title"].apply(_safe_text)
         td["pubdate"] = td["pubdate"].apply(_safe_text)
 
-        # code と url が空のものは捨てる
         td = td[(td["code"] != "") & (td["document_url"] != "")].copy()
         td["pub_date_only"] = td["pubdate"].apply(_extract_date_from_pubdate)
-
-        # 同じPDFは重複除去
         td = td.drop_duplicates(subset=["code", "document_url"], keep="first")
+    else:
+        td = pd.DataFrame(columns=["code", "title", "document_url", "pubdate", "pub_date_only"])
 
-    # 「データ内で最新の日付＝当日、次点＝前日」
+    # 返ってきた中で最新の日付＝当日、次点＝前日
     max_date = None
     prev_date = None
     if len(td) > 0:
@@ -190,101 +186,6 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         st.write("【診断】Yanoshin結合後件数（重複除去後）:", int(len(td)))
         if len(td) > 0:
             st.write("【診断】pubdateサンプル先頭10:", td["pubdate"].dropna().head(10).tolist())
-            uniq_dates = sorted(set([d for d in td["pub_date_only"].tolist() if isinstance(d, datetime.date)]), reverse=True)
-            st.write("【診断】pub_date_onlyユニーク（新しい順）:", [str(x) for x in uniq_dates])
-            st.write("【診断】当日とみなす日付:", str(max_date) if max_date else "なし")
-            st.write("【診断】前日とみなす日付:", str(prev_date) if prev_date else "なし")
-
-    def _rank(tag: str) -> int:
-        if tag == "当日":
-            return 0
-        if tag == "前日":
-            return 1
-        return 9
-
-    def _decorate_title(day_tag: str, title: str) -> str:
-        title = _safe_text(title)
-        if day_tag == "当日":
-            prefix = "🟦 "
-        elif day_tag == "前日":
-            prefix = "🟨 "
-        else:
-            prefix = ""
-        if title == "":
-            return prefix + "(タイトルなし)"
-        return prefix + title
-
-    # code -> [(day_tag, title_text, url), ...]
-    by_code = {}
-    if len(td) > 0:
-        td2 = td.copy()
-        td2["rank"] = td2["day_tag"].apply(_rank)
-        td2 = td2.sort_values(by=["code", "rank"], ascending=True)
-
-        for _, row in td2.iterrows():
-            c = _safe_text(row.get("code", "")).zfill(4)
-            day_tag = _safe_text(row.get("day_tag", ""))
-            title_text = _decorate_title(day_tag, row.get("title", ""))
-            url = _safe_text(row.get("document_url", ""))
-            by_code.setdefault(c, []).append((day_tag, title_text, url))
-
-    df_out = df_in.copy()
-    df_out["code"] = df_out["code"].astype(str).str.strip().str.zfill(4)
-
-    df_out["開示件数"] = df_out["code"].apply(lambda c: len(by_code.get(c, [])))
-
-    def _get_item(c, i):
-        items = by_code.get(c, [])
-        if i < len(items):
-            _day_tag0, title_text0, url0 = items[i]
-            return title_text0, url0
-        return "", ""
-
-    for i in range(3):
-        df_out[f"開示タイトル{i+1}"] = df_out["code"].apply(lambda c, i=i: _get_item(c, i)[0])
-        df_out[f"PDFリンク{i+1}"] = df_out["code"].apply(lambda c, i=i: _get_item(c, i)[1])
-
-    # 詳細（最大5件）
-    def _top5(c):
-        items = by_code.get(c, [])[:5]
-        return [{"title": t, "url": u} for (_day_tag0, t, u) in items]
-
-    df_out["_開示上位5"] = df_out["code"].apply(_top5)
-
-    return df_out
-
-    def _day_tag(d: Optional[datetime.date]) -> str:
-        if d is None:
-            return ""
-        if max_date is not None and d == max_date:
-            return "当日"
-        if prev_date is not None and d == prev_date:
-            return "前日"
-        return ""
-
-    if len(td) > 0:
-        td["day_tag"] = td["pub_date_only"].apply(_day_tag)
-    else:
-        td["day_tag"] = ""
-
-    if debug:
-        st.write("【診断】Yanoshin件数 today:", int(len(td_today)))
-        st.write("【診断】Yanoshin件数 yesterday:", int(len(td_yesterday)))
-        st.write("【診断】Yanoshin結合後件数（重複除去後）:", int(len(td)))
-        st.write("【診断】pubdateサンプル先頭10:", td["pubdate"].dropna().head(10).tolist())
-        st.write("【診断】pub_date_only日付別件数:", td["pub_date_only"].value_counts(dropna=False).to_dict())
-        st.write("【診断】取得URL:", url_today, url_yesterday)
-                # 【追加診断】捨てている理由を可視化
-        st.write("【診断】td columns:", list(td.columns) if len(td) > 0 else [])
-        st.write("【診断】td sample code/url/pubdate:",
-                 td[["code", "document_url", "pubdate"]].head(5).to_dict("records") if len(td) > 0 else [])
-        st.write("【診断】空の件数(code/url):",
-                 {
-                     "code_empty": int((td["code"].astype(str).str.strip() == "").sum()) if "code" in td.columns else -1,
-                     "url_empty": int((td["document_url"].astype(str).str.strip() == "").sum()) if "document_url" in td.columns else -1,
-                 } if len(td) > 0 else {})
-
-        if len(td) > 0:
             uniq_dates = sorted(
                 set([d for d in td["pub_date_only"].tolist() if isinstance(d, datetime.date)]),
                 reverse=True,
@@ -292,7 +193,6 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             st.write("【診断】pub_date_onlyユニーク（新しい順）:", [str(x) for x in uniq_dates])
             st.write("【診断】当日とみなす日付:", str(max_date) if max_date else "なし")
             st.write("【診断】前日とみなす日付:", str(prev_date) if prev_date else "なし")
-            st.write("【診断】day_tag内訳:", td["day_tag"].value_counts(dropna=False).to_dict())
 
     def _rank(tag: str) -> int:
         if tag == "当日":
@@ -301,7 +201,6 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             return 1
         return 9
 
-    # ★修正：当日/前日文字を消して🟦🟨だけにする
     def _decorate_title(day_tag: str, title: str) -> str:
         title = _safe_text(title)
         if day_tag == "当日":
@@ -314,7 +213,6 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             return prefix + "(タイトルなし)"
         return prefix + title
 
-    # code -> [(day_tag, title_text, url), ...]
     by_code = {}
     if len(td) > 0:
         td2 = td.copy()
@@ -336,7 +234,7 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     def _get_item(c, i):
         items = by_code.get(c, [])
         if i < len(items):
-            _day_tag, title_text, url = items[i]
+            _dt, title_text, url = items[i]
             return title_text, url
         return "", ""
 
@@ -344,10 +242,9 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         df_out[f"開示タイトル{i+1}"] = df_out["code"].apply(lambda c, i=i: _get_item(c, i)[0])
         df_out[f"PDFリンク{i+1}"] = df_out["code"].apply(lambda c, i=i: _get_item(c, i)[1])
 
-    # 詳細（最大5件）
     def _top5(c):
         items = by_code.get(c, [])[:5]
-        return [{"title": t, "url": u} for (_day_tag, t, u) in items]
+        return [{"title": t, "url": u} for (_dt, t, u) in items]
 
     df_out["_開示上位5"] = df_out["code"].apply(_top5)
 
@@ -361,7 +258,9 @@ PTS_URL_TEMPLATE = "https://s.kabutan.jp/warnings/pts_night_price_increase/?page
 
 def fetch_pts_page(page: int) -> str:
     url = PTS_URL_TEMPLATE.format(page=page)
-    r = requests.get(url, timeout=20)
+    # 403対策（必要な場合だけ効く）
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, headers=headers, timeout=20)
     r.raise_for_status()
     return r.text
 
@@ -398,6 +297,10 @@ def parse_pts_page(html: str) -> pd.DataFrame:
 
         volume = _to_int(tds[3].get_text(strip=True))
 
+        # ストップ高表示（S または Sｹ）が「セル内に独立して」出ている時だけ True
+        tds_text = " ".join([td.get_text(" ", strip=True) for td in tds])
+        is_stop_high = bool(re.search(r"(?:^|\s)[SＳ](?:ｹ|ケ)?(?:$|\s)", tds_text))
+
         rows.append(
             {
                 "code": code,
@@ -407,7 +310,7 @@ def parse_pts_page(html: str) -> pd.DataFrame:
                 "close_price": close_price,
                 "pts_price": pts_price,
                 "pct_raw": pct_raw,
-                "is_stop_high": ("S" in (th_text + " " + " ".join([td.get_text(" ", strip=True) for td in tds]))),
+                "is_stop_high": is_stop_high,
             }
         )
 
@@ -439,9 +342,9 @@ def crawl_until_below_threshold(pct_threshold: float, max_pages: int, debug: boo
 
         all_df.append(df)
 
-        # ★修正：mxがNaN/Noneなら安全側で停止
         if debug:
             st.write(f"【診断】Kabutan page={page}: max pct =", mx if mx is not None else "None/NaN")
+
         if mx is None or mx < pct_threshold:
             break
 
@@ -454,15 +357,11 @@ def crawl_until_below_threshold(pct_threshold: float, max_pages: int, debug: boo
 
 # ========= UI =========
 
-# 横幅最大化（これが効く）
 st.set_page_config(layout="wide")
-
 st.title("PTSナイトタイム上昇率ランキング + TDnet適時開示")
 
 debug = st.checkbox("診断表示（開発用）", value=False)
-
-# ★追加：凡例
-st.caption("🟦＝当日　🟨＝前日")
+st.caption("🟦＝当日　🟨＝前日（※Yanoshinのデータ内で最新日＝当日）")
 
 pct_min = st.text_input("上昇率(%)の下限", value="5")
 vol_min = st.text_input("出来高の下限", value="1000")
@@ -482,42 +381,30 @@ if st.button("取得して表示"):
             raise ValueError(f"最大ページ数が解釈できません: {max_pages}")
 
         df, last_page = crawl_until_below_threshold(
-            # 【追加】出来高で絞り込み（ストップ高は例外）＋出来高で並べる
             pct_threshold=float(pct_min_val),
             max_pages=int(max_pages_val),
             debug=debug,
         )
-        df2 = df.dropna(subset=["pct", "volume"]).copy()
-        if "is_stop_high" not in df2.columns:
-            df2["is_stop_high"] = False
-        df2 = df2[
-            (df2["pct"] >= float(pct_min)) &
-            ((df2["volume"] >= int(vol_min)) | (df2["is_stop_high"] == True))
-        ].copy()
-        df2 = df2.sort_values(by=["is_stop_high", "volume", "pct"], ascending=[False, False, False])
 
         df2 = df.dropna(subset=["pct", "volume"]).copy()
-        # --- ここから追加：ストップ高フラグが無ければFalseで作る ---
-        if "is_stop_high" not in df2.columns:
-            df2["is_stop_high"] = False
-        # --- ここまで追加 ---
-        # --- ここから追加：並び順（ストップ高→出来高→上昇率） ---
-        df2 = df2.sort_values(by=["is_stop_high", "volume", "pct"], ascending=[False, False, False])
-        # --- ここまで追加 ---
+
+        # 出来高条件（ストップ高は出来高条件を無視）
         df2 = df2[
-        (df2["pct"] >= float(pct_min_val)) &
-        ((df2["volume"] >= int(vol_min_val)) | (df2["is_stop_high"] == True))
+            (df2["pct"] >= float(pct_min_val)) &
+            ((df2["volume"] >= int(vol_min_val)) | (df2["is_stop_high"] == True))
         ].copy()
+
+        # 並び：ストップ高 → 出来高 → 上昇率
+        df2 = df2.sort_values(by=["is_stop_high", "volume", "pct"], ascending=[False, False, False])
 
         df2 = attach_disclosures(df2, debug=debug)
 
         hit = df2[df2["開示件数"] > 0].copy()
         st.write(f"【集計】開示あり: {len(hit)} / 開示なし: {len(df2) - len(hit)}")
         st.success(
-            f"{last_page}ページ目まで巡回。抽出 {len(df2)} 件（pct>={pct_min_val}, volume>={vol_min_val}）"
+            f"{last_page}ページ目まで巡回。抽出 {len(df2)} 件（pct>={pct_min_val}, volume>={vol_min_val} ※ストップ高は出来高条件を無視）"
         )
 
-        # 表が太くならないよう短く整形
         df_show = df2.copy()
         df_show["pct"] = df_show["pct"].apply(lambda x: "" if pd.isna(x) else f"{float(x):.2f}")
         df_show["volume"] = df_show["volume"].apply(lambda x: "" if pd.isna(x) else f"{int(x):,}")
@@ -537,9 +424,6 @@ if st.button("取得して表示"):
                 return st.column_config.LinkColumn(colname, display_text="PDF")
             except TypeError:
                 return st.column_config.LinkColumn(colname)
-        # 【強制】表示直前にもう一回だけ出来高フィルタ（これで100は消える）
-        df2 = df2[(df2["volume"] >= int(vol_min)) | (df2.get("is_stop_high", False) == True)].copy()
-        df2 = df2.sort_values(by=["is_stop_high", "volume", "pct"], ascending=[False, False, False]) 
 
         st.dataframe(
             df_show,
@@ -577,8 +461,8 @@ if st.button("取得して表示"):
 else:
     st.info("条件を設定して「取得して表示」を押してください。")
 
-
         
+
 
 
 
