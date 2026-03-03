@@ -88,12 +88,12 @@ def _extract_date_from_pubdate(pubdate: str) -> Optional[datetime.date]:
 
 
 def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame:
-        url_today = "https://webapi.yanoshin.jp/webapi/tdnet/list/today.json2?limit=2000"
+    url_today = "https://webapi.yanoshin.jp/webapi/tdnet/list/today.json2?limit=2000"
     url_yesterday = "https://webapi.yanoshin.jp/webapi/tdnet/list/yesterday.json2?limit=2000"
 
     td_today = _fetch(url_today, source_tag="today")
     td_yesterday = _fetch(url_yesterday, source_tag="yesterday")
-    td = pd.concat([td_today, td_yesterday], ignore_index=True)
+    td = pd.concat([td_today, td_yesterday], ignore_index=True)    
     td_today = td  # 診断表示互換のため（なくてもOK）
     td_yesterday = td
 
@@ -445,6 +445,7 @@ else:
 
 
         
+
 
 
 
