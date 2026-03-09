@@ -134,8 +134,19 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         return _normalize_company_code(s)
 
     def _normalize_yanoshin_df(raw_df: pd.DataFrame, source_tag: str) -> pd.DataFrame:
+        expanded_df = raw_df.copy()
+        if "Tdnet" in expanded_df.columns:
+            tdnet_rows = []
+            for _, row in expanded_df.iterrows():
+                tdnet_val = row.get("Tdnet")
+                if isinstance(tdnet_val, dict):
+                    tdnet_rows.append(tdnet_val)
+                else:
+                    tdnet_rows.append({})
+            expanded_df = pd.json_normalize(tdnet_rows)
+
         rows = []
-        for _, row in raw_df.iterrows():
+        for _, row in expanded_df.iterrows():
             it = row.to_dict() if hasattr(row, "to_dict") else dict(row)
             raw_code = _pick_value(it, "company_code", "code", "CompanyCode", "Company_Code")
             raw_title = _pick_value(it, "title", "Title", "subject", "Subject")
@@ -156,18 +167,37 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             return pd.DataFrame(columns=["code", "source_tag", "title", "document_url", "pubdate"])
         return pd.DataFrame(rows)
 
+    def _yanoshin_items_from_json(data) -> list:
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = data.get("items")
+            if items is None:
+                items = data.get("result")
+            if items is None:
+                items = data.get("Tdnet")
+            if items is None:
+                items = []
+        else:
+            items = []
+
+        if not isinstance(items, list):
+            items = []
+
+        flat_items = []
+        for item in items:
+            if isinstance(item, dict) and isinstance(item.get("Tdnet"), dict):
+                flat_items.append(item.get("Tdnet"))
+            else:
+                flat_items.append(item)
+        return flat_items
+
     def _fetch(url: str, source_tag: str) -> Tuple[pd.DataFrame, int, pd.DataFrame]:
         r = requests.get(url, timeout=20)
         r.raise_for_status()
         data = r.json()
 
-        items = data.get("items")
-        if items is None:
-            items = data.get("result")
-        if items is None:
-            items = data
-        if not isinstance(items, list):
-            items = []
+        items = _yanoshin_items_from_json(data)
         raw_df = pd.DataFrame(items)
         normalized_df = _normalize_yanoshin_df(raw_df, source_tag=source_tag)
         return normalized_df, int(r.status_code), raw_df
@@ -182,22 +212,22 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         td["title"] = td["title"].apply(_safe_text)
         td["pubdate"] = td["pubdate"].apply(_safe_text)
 
+        required_cols = ["code", "document_url"]
+        missing_cols = [c for c in required_cols if c not in td.columns]
+        if len(missing_cols) > 0:
+            if debug:
+                st.write("【診断】空フィルタ前の不足列:", missing_cols)
+                st.write("【診断】空フィルタ前のcolumns:", td.columns.tolist())
+                st.write("【診断】空フィルタ前のhead(3):")
+                st.dataframe(td.head(3))
+            st.error(f"Yanoshinデータの必須列が不足しています: {missing_cols}")
+            raise RuntimeError(f"Yanoshin required columns missing: {missing_cols}")
+
         before_filter = len(td)
         td = td[(td["code"] != "") & (td["document_url"] != "")].copy()
         after_filter = len(td)
         dropped_by_empty_filter = before_filter - after_filter
         td["pub_date_only"] = td["pubdate"].apply(_extract_date_from_pubdate)
-
-        required_cols = ["code", "document_url"]
-        missing_cols = [c for c in required_cols if c not in td.columns]
-        if len(missing_cols) > 0:
-            if debug:
-                st.write("【診断】drop_duplicates前の不足列:", missing_cols)
-                st.write("【診断】drop_duplicates前のcolumns:", td.columns.tolist())
-                st.write("【診断】drop_duplicates前のhead(3):")
-                st.dataframe(td.head(3))
-            st.error(f"Yanoshinデータの必須列が不足しています: {missing_cols}")
-            raise RuntimeError(f"Yanoshin required columns missing: {missing_cols}")
 
         td = td.drop_duplicates(subset=["code", "document_url"], keep="first")
     else:
@@ -236,10 +266,16 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         st.write("【診断】Yanoshin件数 yesterday:", int(len(td_yesterday)))
         st.write("【診断】today raw shape:", tuple(raw_today.shape))
         st.write("【診断】today columns:", raw_today.columns.tolist())
-        st.write("【診断】today codeサンプル10件:", raw_today.get("code", pd.Series(dtype=object)).head(10).tolist())
-        st.write("【診断】today urlサンプル3件:", raw_today.get("document_url", pd.Series(dtype=object)).head(3).tolist())
+        if list(raw_today.columns) == ["Tdnet"] and len(raw_today) > 0:
+            td0 = raw_today["Tdnet"].iloc[0]
+            st.write("【診断】today Tdnet先頭要素type:", str(type(td0)))
+            st.write("【診断】today Tdnet先頭要素(短縮):", str(td0)[:300])
         st.write("【診断】yesterday raw shape:", tuple(raw_yesterday.shape))
         st.write("【診断】yesterday columns:", raw_yesterday.columns.tolist())
+        st.write("【診断】today normalize後 shape:", tuple(td_today.shape))
+        st.write("【診断】today normalize後 columns:", td_today.columns.tolist())
+        st.write("【診断】today codeサンプル10件:", td_today.get("code", pd.Series(dtype=object)).head(10).tolist())
+        st.write("【診断】today urlサンプル3件:", td_today.get("document_url", pd.Series(dtype=object)).head(3).tolist())
         st.write("【診断】today head(3):")
         st.dataframe(td_today.head(3))
         st.write("【診断】yesterday head(3):")
