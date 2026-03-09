@@ -58,11 +58,25 @@ def _to_float_pct(pct_text: str) -> Optional[float]:
 # ========= Yanoshin TDnet =========
 
 def _normalize_company_code(s) -> str:
-    s = "" if s is None else str(s).strip()
-    if len(s) == 5 and s.endswith("0") and s[:4].isdigit():
-        return s[:4]
-    digits = "".join([c for c in s if c.isdigit()])
-    return digits[:4] if len(digits) >= 4 else digits
+    s = _safe_text(s)
+    if s == "":
+        return ""
+
+    # 英字入りコードはそのまま維持（例: 130A）
+    if re.search(r"[A-Za-z]", s):
+        return s
+
+    # 数値コードは「5桁末尾0を落とす」→「4桁は4桁で維持」に統一
+    digits = re.sub(r"\D", "", s)
+    if digits == "":
+        return ""
+    if len(digits) == 5 and digits.endswith("0"):
+        return digits[:4]
+    if len(digits) == 4:
+        return digits
+    if len(digits) < 4:
+        return digits.zfill(4)
+    return digits[:4]
 
 
 def _extract_date_from_pubdate(pubdate: str) -> Optional[datetime.date]:
@@ -155,7 +169,7 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
 
             rows.append(
                 {
-                    "code": _normalize_code_value(raw_code).zfill(4),
+                    "code": _normalize_code_value(raw_code),
                     "source_tag": source_tag,
                     "title": _safe_text(raw_title),
                     "document_url": _safe_text(raw_url),
@@ -207,7 +221,7 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     td = pd.concat([td_today, td_yesterday], ignore_index=True)
 
     if len(td) > 0:
-        td["code"] = td["code"].apply(_safe_text).str.zfill(4)
+        td["code"] = td["code"].apply(_normalize_company_code)
         td["document_url"] = td["document_url"].apply(_safe_text)
         td["title"] = td["title"].apply(_safe_text)
         td["pubdate"] = td["pubdate"].apply(_safe_text)
@@ -296,7 +310,8 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         today_code_samples = []
         for _, r in raw_today.head(10).iterrows():
             it = r.to_dict()
-            today_code_samples.append(_pick_value(it, "company_code", "code", "CompanyCode", "Company_Code"))
+            raw_code = _pick_value(it, "company_code", "code", "CompanyCode", "Company_Code")
+            today_code_samples.append(_normalize_code_value(raw_code))
         today_url_samples = []
         for _, r in raw_today.head(3).iterrows():
             it = r.to_dict()
@@ -344,14 +359,14 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         td2 = td2.sort_values(by=["code", "rank"], ascending=True)
 
         for _, row in td2.iterrows():
-            c = _safe_text(row.get("code", "")).zfill(4)
+            c = _normalize_company_code(row.get("code", ""))
             day_tag = _safe_text(row.get("day_tag", ""))
             title_text = _decorate_title(day_tag, row.get("title", ""))
             url = _safe_text(row.get("document_url", ""))
             by_code.setdefault(c, []).append((day_tag, title_text, url))
 
     df_out = df_in.copy()
-    df_out["code"] = df_out["code"].astype(str).str.strip().str.zfill(4)
+    df_out["code"] = df_out["code"].apply(_normalize_company_code)
 
     df_out["開示件数"] = df_out["code"].apply(lambda c: len(by_code.get(c, [])))
 
