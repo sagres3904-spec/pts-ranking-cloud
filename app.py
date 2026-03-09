@@ -111,7 +111,52 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
                 return normalized[nk]
         return ""
 
-    def _fetch(url: str, source_tag: str) -> Tuple[pd.DataFrame, int]:
+    def _normalize_code_value(raw_code) -> str:
+        if raw_code is None:
+            return ""
+        try:
+            if isinstance(raw_code, float) and pd.isna(raw_code):
+                return ""
+            if isinstance(raw_code, (int, float)):
+                return _normalize_company_code(str(int(float(raw_code))))
+        except Exception:
+            pass
+
+        s = _safe_text(raw_code)
+        if s == "":
+            return ""
+        try:
+            f = float(s)
+            if pd.notna(f):
+                return _normalize_company_code(str(int(f)))
+        except Exception:
+            pass
+        return _normalize_company_code(s)
+
+    def _normalize_yanoshin_df(raw_df: pd.DataFrame, source_tag: str) -> pd.DataFrame:
+        rows = []
+        for _, row in raw_df.iterrows():
+            it = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+            raw_code = _pick_value(it, "company_code", "code", "CompanyCode", "Company_Code")
+            raw_title = _pick_value(it, "title", "Title", "subject", "Subject")
+            raw_url = _pick_value(it, "document_url", "documentUrl", "pdf_url", "pdfUrl", "url", "Url")
+            raw_pubdate = _pick_value(it, "pubdate", "Pubdate", "date", "Date", "published_at")
+
+            rows.append(
+                {
+                    "code": _normalize_code_value(raw_code).zfill(4),
+                    "source_tag": source_tag,
+                    "title": _safe_text(raw_title),
+                    "document_url": _safe_text(raw_url),
+                    "pubdate": _safe_text(raw_pubdate),
+                }
+            )
+
+        if len(rows) == 0:
+            return pd.DataFrame(columns=["code", "source_tag", "title", "document_url", "pubdate"])
+        return pd.DataFrame(rows)
+
+    def _fetch(url: str, source_tag: str) -> Tuple[pd.DataFrame, int, pd.DataFrame]:
         r = requests.get(url, timeout=20)
         r.raise_for_status()
         data = r.json()
@@ -123,36 +168,12 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             items = data
         if not isinstance(items, list):
             items = []
+        raw_df = pd.DataFrame(items)
+        normalized_df = _normalize_yanoshin_df(raw_df, source_tag=source_tag)
+        return normalized_df, int(r.status_code), raw_df
 
-        rows = []
-        for it in items:
-            # キー名がズレても拾えるように候補を並べる
-            raw_code = _pick_value(it, "company_code", "code", "CompanyCode", "Company_Code")
-            raw_title = _pick_value(it, "title", "Title", "subject", "Subject")
-            raw_url = _pick_value(it, "document_url", "documentUrl", "pdf_url", "pdfUrl", "url", "Url")
-            raw_pubdate = _pick_value(it, "pubdate", "Pubdate", "date", "Date", "published_at")
-
-            code = _safe_text(_normalize_company_code(raw_code)).zfill(4)
-            title = _safe_text(raw_title)
-            doc_url = _safe_text(raw_url)
-            pubdate = _safe_text(raw_pubdate)
-
-            rows.append(
-                {
-                    "code": code,
-                    "source_tag": source_tag,
-                    "title": title,
-                    "document_url": doc_url,
-                    "pubdate": pubdate,
-                }
-            )
-
-        if len(rows) == 0:
-            return pd.DataFrame(columns=["code", "source_tag", "title", "document_url", "pubdate"]), int(r.status_code)
-        return pd.DataFrame(rows), int(r.status_code)
-
-    td_today, status_today = _fetch(url_today, source_tag="today")
-    td_yesterday, status_yesterday = _fetch(url_yesterday, source_tag="yesterday")
+    td_today, status_today, raw_today = _fetch(url_today, source_tag="today")
+    td_yesterday, status_yesterday, raw_yesterday = _fetch(url_yesterday, source_tag="yesterday")
     td = pd.concat([td_today, td_yesterday], ignore_index=True)
 
     if len(td) > 0:
@@ -161,7 +182,10 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         td["title"] = td["title"].apply(_safe_text)
         td["pubdate"] = td["pubdate"].apply(_safe_text)
 
+        before_filter = len(td)
         td = td[(td["code"] != "") & (td["document_url"] != "")].copy()
+        after_filter = len(td)
+        dropped_by_empty_filter = before_filter - after_filter
         td["pub_date_only"] = td["pubdate"].apply(_extract_date_from_pubdate)
 
         required_cols = ["code", "document_url"]
@@ -178,6 +202,7 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         td = td.drop_duplicates(subset=["code", "document_url"], keep="first")
     else:
         td = pd.DataFrame(columns=["code", "title", "document_url", "pubdate", "pub_date_only"])
+        dropped_by_empty_filter = 0
 
     # 返ってきた中で最新の日付＝当日、次点＝前日
     max_date = None
@@ -209,15 +234,44 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         st.write("【診断】status code today/yesterday:", status_today, status_yesterday)
         st.write("【診断】Yanoshin件数 today:", int(len(td_today)))
         st.write("【診断】Yanoshin件数 yesterday:", int(len(td_yesterday)))
-        st.write("【診断】today columns:", td_today.columns.tolist())
-        st.write("【診断】yesterday columns:", td_yesterday.columns.tolist())
+        st.write("【診断】today raw shape:", tuple(raw_today.shape))
+        st.write("【診断】today columns:", raw_today.columns.tolist())
+        st.write("【診断】today codeサンプル10件:", raw_today.get("code", pd.Series(dtype=object)).head(10).tolist())
+        st.write("【診断】today urlサンプル3件:", raw_today.get("document_url", pd.Series(dtype=object)).head(3).tolist())
+        st.write("【診断】yesterday raw shape:", tuple(raw_yesterday.shape))
+        st.write("【診断】yesterday columns:", raw_yesterday.columns.tolist())
         st.write("【診断】today head(3):")
         st.dataframe(td_today.head(3))
         st.write("【診断】yesterday head(3):")
         st.dataframe(td_yesterday.head(3))
+        st.write("【診断】空フィルタ後の件数:", int(len(td_today) + len(td_yesterday) - dropped_by_empty_filter))
+        st.write("【診断】normalize後の件数:", int(len(td_today) + len(td_yesterday)))
         st.write("【診断】Yanoshin結合後件数（重複除去後）:", int(len(td)))
         if len(td_today) > 0 and len(td) == 0:
-            st.error("【診断】todayが0件超なのに結合後が0件です。列マッピングやフィルタ条件を確認してください。")
+            st.error(
+                f"【診断】todayが0件超なのに結合後が0件です。空フィルタで{dropped_by_empty_filter}件除外されました。"
+            )
+    if len(td_today) > 0 and len(td) == 0:
+        raise RuntimeError(
+            f"Yanoshin normalize failed: today={len(td_today)} > 0 but merged=0. dropped_by_empty_filter={dropped_by_empty_filter}"
+        )
+
+    if debug and len(raw_today) > 0:
+        today_code_samples = []
+        for _, r in raw_today.head(10).iterrows():
+            it = r.to_dict()
+            today_code_samples.append(_pick_value(it, "company_code", "code", "CompanyCode", "Company_Code"))
+        today_url_samples = []
+        for _, r in raw_today.head(3).iterrows():
+            it = r.to_dict()
+            today_url_samples.append(_pick_value(it, "document_url", "documentUrl", "pdf_url", "pdfUrl", "url", "Url"))
+        st.write("【診断】today codeサンプル10件(候補キー適用後):", today_code_samples)
+        st.write("【診断】today urlサンプル3件(候補キー適用後):", today_url_samples)
+
+    if debug and len(td_today) > 0:
+        empty_url_count = int((td_today["document_url"] == "").sum())
+        st.write("【診断】today URL空件数:", empty_url_count)
+        st.write("【診断】today URL有効件数:", int(len(td_today) - empty_url_count))
         if len(td) > 0:
             st.write("【診断】pubdateサンプル先頭10:", td["pubdate"].dropna().head(10).tolist())
             uniq_dates = sorted(
