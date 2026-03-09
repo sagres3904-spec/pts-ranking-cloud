@@ -91,7 +91,27 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     url_today = "https://webapi.yanoshin.jp/webapi/tdnet/list/today.json2?limit=2000"
     url_yesterday = "https://webapi.yanoshin.jp/webapi/tdnet/list/yesterday.json2?limit=2000"
 
-    def _fetch(url: str, source_tag: str) -> pd.DataFrame:
+    def _pick_value(it: dict, *keys) -> str:
+        if not isinstance(it, dict):
+            return ""
+
+        for k in keys:
+            v = it.get(k)
+            if v is not None and _safe_text(v) != "":
+                return v
+
+        normalized = {}
+        for k, v in it.items():
+            nk = re.sub(r"[^a-z0-9]", "", str(k).lower())
+            normalized[nk] = v
+
+        for k in keys:
+            nk = re.sub(r"[^a-z0-9]", "", str(k).lower())
+            if nk in normalized and _safe_text(normalized[nk]) != "":
+                return normalized[nk]
+        return ""
+
+    def _fetch(url: str, source_tag: str) -> Tuple[pd.DataFrame, int]:
         r = requests.get(url, timeout=20)
         r.raise_for_status()
         data = r.json()
@@ -107,17 +127,10 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         rows = []
         for it in items:
             # キー名がズレても拾えるように候補を並べる
-            raw_code = it.get("company_code") or it.get("code") or it.get("CompanyCode") or it.get("Company_Code")
-            raw_title = it.get("title") or it.get("Title") or it.get("subject") or it.get("Subject")
-            raw_url = (
-                it.get("document_url")
-                or it.get("documentUrl")
-                or it.get("pdf_url")
-                or it.get("pdfUrl")
-                or it.get("url")
-                or it.get("Url")
-            )
-            raw_pubdate = it.get("pubdate") or it.get("Pubdate") or it.get("date") or it.get("Date")
+            raw_code = _pick_value(it, "company_code", "code", "CompanyCode", "Company_Code")
+            raw_title = _pick_value(it, "title", "Title", "subject", "Subject")
+            raw_url = _pick_value(it, "document_url", "documentUrl", "pdf_url", "pdfUrl", "url", "Url")
+            raw_pubdate = _pick_value(it, "pubdate", "Pubdate", "date", "Date", "published_at")
 
             code = _safe_text(_normalize_company_code(raw_code)).zfill(4)
             title = _safe_text(raw_title)
@@ -135,11 +148,11 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             )
 
         if len(rows) == 0:
-            return pd.DataFrame(columns=["code", "source_tag", "title", "document_url", "pubdate"])
-        return pd.DataFrame(rows)
+            return pd.DataFrame(columns=["code", "source_tag", "title", "document_url", "pubdate"]), int(r.status_code)
+        return pd.DataFrame(rows), int(r.status_code)
 
-    td_today = _fetch(url_today, source_tag="today")
-    td_yesterday = _fetch(url_yesterday, source_tag="yesterday")
+    td_today, status_today = _fetch(url_today, source_tag="today")
+    td_yesterday, status_yesterday = _fetch(url_yesterday, source_tag="yesterday")
     td = pd.concat([td_today, td_yesterday], ignore_index=True)
 
     if len(td) > 0:
@@ -150,6 +163,18 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
 
         td = td[(td["code"] != "") & (td["document_url"] != "")].copy()
         td["pub_date_only"] = td["pubdate"].apply(_extract_date_from_pubdate)
+
+        required_cols = ["code", "document_url"]
+        missing_cols = [c for c in required_cols if c not in td.columns]
+        if len(missing_cols) > 0:
+            if debug:
+                st.write("【診断】drop_duplicates前の不足列:", missing_cols)
+                st.write("【診断】drop_duplicates前のcolumns:", td.columns.tolist())
+                st.write("【診断】drop_duplicates前のhead(3):")
+                st.dataframe(td.head(3))
+            st.error(f"Yanoshinデータの必須列が不足しています: {missing_cols}")
+            raise RuntimeError(f"Yanoshin required columns missing: {missing_cols}")
+
         td = td.drop_duplicates(subset=["code", "document_url"], keep="first")
     else:
         td = pd.DataFrame(columns=["code", "title", "document_url", "pubdate", "pub_date_only"])
@@ -181,9 +206,18 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
 
     if debug:
         st.write("【診断】取得URL:", url_today, url_yesterday)
+        st.write("【診断】status code today/yesterday:", status_today, status_yesterday)
         st.write("【診断】Yanoshin件数 today:", int(len(td_today)))
         st.write("【診断】Yanoshin件数 yesterday:", int(len(td_yesterday)))
+        st.write("【診断】today columns:", td_today.columns.tolist())
+        st.write("【診断】yesterday columns:", td_yesterday.columns.tolist())
+        st.write("【診断】today head(3):")
+        st.dataframe(td_today.head(3))
+        st.write("【診断】yesterday head(3):")
+        st.dataframe(td_yesterday.head(3))
         st.write("【診断】Yanoshin結合後件数（重複除去後）:", int(len(td)))
+        if len(td_today) > 0 and len(td) == 0:
+            st.error("【診断】todayが0件超なのに結合後が0件です。列マッピングやフィルタ条件を確認してください。")
         if len(td) > 0:
             st.write("【診断】pubdateサンプル先頭10:", td["pubdate"].dropna().head(10).tolist())
             uniq_dates = sorted(
