@@ -533,9 +533,6 @@ if st.button("取得して表示"):
             ((df2["volume"] >= int(vol_min_val)) | (df2["is_stop_high"] == True))
         ].copy()
 
-        # 並び：ストップ高 → 出来高 → 上昇率
-        df2 = df2.sort_values(by=["is_stop_high", "volume", "pct"], ascending=[False, False, False])
-
         df2 = attach_disclosures(df2, debug=debug)
 
         hit = df2[df2["開示件数"] > 0].copy()
@@ -544,7 +541,16 @@ if st.button("取得して表示"):
             f"{last_page}ページ目まで巡回。抽出 {len(df2)} 件（pct>={pct_min_val}, volume>={vol_min_val} ※ストップ高は出来高条件を無視）"
         )
 
-        df_show = df2.copy()
+        df_show = df2.sort_values(
+            by=["pct", "volume", "is_stop_high"],
+            ascending=[False, False, False],
+            kind="mergesort",
+        ).reset_index(drop=True)
+
+        if debug:
+            st.write("【診断】表示直前ソート確認 head(10):")
+            st.dataframe(df_show[["pct", "volume", "is_stop_high"]].head(10), hide_index=True)
+
         df_show["pct"] = df_show["pct"].apply(lambda x: "" if pd.isna(x) else f"{float(x):.2f}")
         df_show["volume"] = df_show["volume"].apply(lambda x: "" if pd.isna(x) else f"{int(x):,}")
         df_show["開示件数"] = df_show["開示件数"].apply(lambda x: "" if pd.isna(x) else str(int(x)))
