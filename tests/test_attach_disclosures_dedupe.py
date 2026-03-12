@@ -70,6 +70,7 @@ class AttachDisclosuresDedupeTest(unittest.TestCase):
         ]
 
         out = self.run_attach(today, yesterday, ["1111"])
+        self.assertEqual(out.iloc[0, 3], "https://example.com/docs/a.pdf?token=today")
         self.assertEqual(int(out.loc[0, "開示件数"]), 1)
 
     def test_case_b_host_case_fragment_and_trailing_slash_are_deduped(self):
