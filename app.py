@@ -1,6 +1,7 @@
 import re
 import datetime
 from typing import Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit, unquote
 
 import pandas as pd
 import requests
@@ -104,6 +105,38 @@ def _extract_date_from_pubdate(pubdate: str) -> Optional[datetime.date]:
 def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame:
     url_today = "https://webapi.yanoshin.jp/webapi/tdnet/list/today.json2?limit=2000"
     url_yesterday = "https://webapi.yanoshin.jp/webapi/tdnet/list/yesterday.json2?limit=2000"
+
+    def _canonicalize_document_url(raw_url) -> str:
+        s = _safe_text(raw_url)
+        if s == "":
+            return ""
+
+        try:
+            parts = urlsplit(s)
+        except Exception:
+            return s.rstrip("/")
+
+        scheme = parts.scheme.lower()
+        netloc = parts.netloc.lower()
+        path = parts.path.rstrip("/")
+        if path == "" and parts.path.startswith("/"):
+            path = "/"
+        return urlunsplit((scheme, netloc, path, "", ""))
+
+    def _extract_doc_identity(raw_url) -> str:
+        canonical_url = _canonicalize_document_url(raw_url)
+        if canonical_url == "":
+            return ""
+
+        try:
+            path = urlsplit(canonical_url).path
+        except Exception:
+            path = ""
+
+        normalized_path = unquote(path).rstrip("/")
+        if normalized_path != "":
+            return normalized_path
+        return canonical_url
 
     def _pick_value(it: dict, *keys) -> str:
         if not isinstance(it, dict):
@@ -241,11 +274,15 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         td = td[(td["code"] != "") & (td["document_url"] != "")].copy()
         after_filter = len(td)
         dropped_by_empty_filter = before_filter - after_filter
+        td["canonical_url"] = td["document_url"].apply(_canonicalize_document_url)
+        td["doc_identity"] = td["document_url"].apply(_extract_doc_identity)
         td["pub_date_only"] = td["pubdate"].apply(_extract_date_from_pubdate)
 
-        td = td.drop_duplicates(subset=["code", "document_url"], keep="first")
+        td = td.drop_duplicates(subset=["code", "doc_identity"], keep="first")
     else:
-        td = pd.DataFrame(columns=["code", "title", "document_url", "pubdate", "pub_date_only"])
+        td = pd.DataFrame(
+            columns=["code", "title", "document_url", "canonical_url", "doc_identity", "pubdate", "pub_date_only"]
+        )
         dropped_by_empty_filter = 0
 
     # 返ってきた中で最新の日付＝当日、次点＝前日
