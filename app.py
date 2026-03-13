@@ -59,13 +59,18 @@ def _to_float_pct(pct_text: str) -> Optional[float]:
 # ========= Yanoshin TDnet =========
 
 def _normalize_company_code(s) -> str:
-    s = _safe_text(s)
+    s = _safe_text(s).upper()
     if s == "":
         return ""
 
-    # 英字入りコードはそのまま維持（例: 130A）
+    # 英字入りコードは 446A / 446A0 を 446A に正規化
     if re.search(r"[A-Za-z]", s):
-        return s
+        alnum = re.sub(r"[^A-Z0-9]", "", s)
+        if re.fullmatch(r"\d{3}[A-Z]0", alnum):
+            return alnum[:4]
+        if re.fullmatch(r"\d{3}[A-Z]", alnum):
+            return alnum
+        return alnum
 
     # 数値コードは「5桁末尾0を落とす」→「4桁は4桁で維持」に統一
     digits = re.sub(r"\D", "", s)
