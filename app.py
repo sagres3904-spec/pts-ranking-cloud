@@ -459,10 +459,10 @@ def parse_pts_page(html: str) -> pd.DataFrame:
             continue
 
         th_text = th.get_text(" ", strip=True)
-        m = re.search(r"(\d{4})", th_text)
+        m = re.search(r"(?<![A-Za-z0-9])(\d{4}|\d{3}[A-Za-z])(?![A-Za-z0-9])", th_text)
         if m is None:
             continue
-        code = m.group(1)
+        code = m.group(1).upper()
         name = th_text.replace(code, "").strip()
 
         close_price = _to_int(tds[0].get_text(strip=True))
