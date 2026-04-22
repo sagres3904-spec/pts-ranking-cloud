@@ -9,6 +9,9 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 
+APP_BUILD_ID = "cloud-stop-high-real-data-20260423"
+
+
 # ========= ユーティリティ =========
 
 def _safe_text(x) -> str:
@@ -54,6 +57,21 @@ def _to_float_pct(pct_text: str) -> Optional[float]:
         except Exception:
             return None
     return None
+
+
+def _to_float_number(text: str) -> Optional[float]:
+    if text is None:
+        return None
+    s = _safe_text(text).replace(",", "")
+    if s == "":
+        return None
+    m = re.findall(r"[-+]?\d+(?:\.\d+)?", s)
+    if len(m) == 0:
+        return None
+    try:
+        return float(m[0])
+    except Exception:
+        return None
 
 
 # ========= Yanoshin TDnet =========
@@ -436,6 +454,42 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
 
 PTS_URL_TEMPLATE = "https://s.kabutan.jp/warnings/pts_night_price_increase/?page={page}"
 
+NORMAL_DAILY_PRICE_LIMITS = [
+    (100, 30),
+    (200, 50),
+    (500, 80),
+    (700, 100),
+    (1000, 150),
+    (1500, 300),
+    (2000, 400),
+    (3000, 500),
+    (5000, 700),
+    (7000, 1000),
+    (10000, 1500),
+    (15000, 3000),
+    (20000, 4000),
+    (30000, 5000),
+    (50000, 7000),
+    (70000, 10000),
+    (100000, 15000),
+    (150000, 30000),
+    (200000, 40000),
+    (300000, 50000),
+    (500000, 70000),
+    (700000, 100000),
+    (1000000, 150000),
+    (1500000, 300000),
+    (2000000, 400000),
+    (3000000, 500000),
+    (5000000, 700000),
+    (7000000, 1000000),
+    (10000000, 1500000),
+    (15000000, 3000000),
+    (20000000, 4000000),
+    (30000000, 5000000),
+    (50000000, 7000000),
+]
+
 
 def fetch_pts_page(page: int) -> str:
     url = PTS_URL_TEMPLATE.format(page=page)
@@ -454,6 +508,37 @@ def _has_stop_high_marker(*texts: str) -> bool:
         if re.search(r"[SＳ](?:ｹ|ケ)?", compact):
             return True
     return False
+
+
+def _get_normal_daily_price_limit(base_price: Optional[float]) -> Optional[float]:
+    if base_price is None or pd.isna(base_price):
+        return None
+    try:
+        price = float(base_price)
+    except Exception:
+        return None
+    if price < 0:
+        return None
+
+    for upper_bound, limit_width in NORMAL_DAILY_PRICE_LIMITS:
+        if price < float(upper_bound):
+            return float(limit_width)
+    return 10000000.0
+
+
+def _is_stop_high_by_price(close_price: Optional[float], pts_price: Optional[float]) -> bool:
+    if close_price is None or pts_price is None:
+        return False
+    if pd.isna(close_price) or pd.isna(pts_price):
+        return False
+
+    # Kabutan の S マーカーが欠ける場合の fallback。JPX の通常制限値幅のみを扱う。
+    limit_width = _get_normal_daily_price_limit(close_price)
+    if limit_width is None:
+        return False
+
+    stop_high_price = float(close_price) + float(limit_width)
+    return float(pts_price) + 1e-9 >= stop_high_price
 
 
 def parse_pts_page(html: str) -> pd.DataFrame:
@@ -480,8 +565,8 @@ def parse_pts_page(html: str) -> pd.DataFrame:
         code = m.group(1).upper()
         name = th_text.replace(code, "").strip()
 
-        close_price = _to_int(tds[0].get_text(strip=True))
-        pts_price = _to_int(tds[1].get_text(strip=True))
+        close_price = _to_float_number(tds[0].get_text(strip=True))
+        pts_price = _to_float_number(tds[1].get_text(strip=True))
 
         pct_raw = tds[2].get_text(strip=True)
         pct = _to_float_pct(pct_raw)
@@ -491,7 +576,10 @@ def parse_pts_page(html: str) -> pd.DataFrame:
         # Kabutan は騰落率セルを複数 span に分けており、S / Sｹ が数値に密着して出ることがある。
         tds_text = " ".join([td.get_text(" ", strip=True) for td in tds])
         pct_text = tds[2].get_text(" ", strip=True)
-        is_stop_high = _has_stop_high_marker(pct_raw, pct_text, tds_text)
+        is_stop_high = _has_stop_high_marker(pct_raw, pct_text, tds_text) or _is_stop_high_by_price(
+            close_price,
+            pts_price,
+        )
 
         rows.append(
             {
@@ -579,6 +667,9 @@ st.title("PTSナイトタイム上昇率ランキング + TDnet適時開示")
 
 debug = st.checkbox("診断表示（開発用）", value=False)
 st.caption("🟦＝当日　🟨＝前日（※Yanoshinのデータ内で最新日＝当日）")
+if debug:
+    st.caption(f"Build: {APP_BUILD_ID}")
+    st.caption("診断メモ: 価格ベースのS高判定は通常制限値幅ベースです（臨時の制限値幅拡大は未対応）。")
 
 pct_min = st.text_input("上昇率(%)の下限", value="5")
 vol_min = st.text_input("出来高の下限", value="1000")
@@ -604,12 +695,43 @@ if st.button("取得して表示"):
             debug=debug,
         )
 
+        if debug:
+            parsed_stop_high_count = 0
+            if "is_stop_high" in df.columns and len(df) > 0:
+                parsed_stop_high_count = int(df["is_stop_high"].fillna(False).sum())
+            st.write("【診断】ビルド識別子:", APP_BUILD_ID)
+            st.write("【診断】取得したPTS行数:", int(len(df)))
+            st.write("【診断】parse直後 is_stop_high=True 件数:", parsed_stop_high_count)
+            if len(df) > 0:
+                st.write("【診断】parse直後 head(20):")
+                st.dataframe(
+                    df.reindex(
+                        columns=["code", "name", "pct", "volume", "close_price", "pts_price", "is_stop_high"]
+                    ).head(20),
+                    hide_index=True,
+                )
+
         df2 = filter_candidate_stocks(
             df=df,
             pct_min=float(pct_min_val),
             vol_min=int(vol_min_val),
             ignore_volume_for_stop_high=ignore_volume_for_stop_high,
         )
+
+        if debug:
+            filtered_stop_high_count = 0
+            if "is_stop_high" in df2.columns and len(df2) > 0:
+                filtered_stop_high_count = int(df2["is_stop_high"].fillna(False).sum())
+            st.write("【診断】filter後の行数:", int(len(df2)))
+            st.write("【診断】filter後 is_stop_high=True 件数:", filtered_stop_high_count)
+            if len(df2) > 0:
+                st.write("【診断】filter後 head(20):")
+                st.dataframe(
+                    df2.reindex(
+                        columns=["code", "name", "pct", "volume", "close_price", "pts_price", "is_stop_high"]
+                    ).head(20),
+                    hide_index=True,
+                )
 
         df2 = attach_disclosures(df2, debug=debug)
 
