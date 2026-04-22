@@ -90,7 +90,33 @@ class ParsePtsPageAlphanumericCodeTest(unittest.TestCase):
         self.assertEqual(out.loc[0, "code"], "446A")
         self.assertTrue(bool(out.loc[0, "is_stop_high"]))
 
-    def test_case_d_alphanumeric_code_survives_filter_candidate_stocks(self):
+    def test_case_d_nested_pct_cell_with_attached_stop_high_marker_is_parsed(self):
+        html = """
+        <div class="gray-sticky-table">
+          <table>
+            <tbody>
+              <tr>
+                <th>446A ノースサンド</th>
+                <td>1,000</td>
+                <td>1,200</td>
+                <td>
+                  <span class="plus-num">+200</span><br>
+                  <span class="text-2xs plus-num">+20.0<span class="text-[10px] ml-px">%</span><span class="text-red w-13px inline-block text-center text-xs">Ｓ</span></span>
+                </td>
+                <td>90</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        """
+
+        out = self.parse_pts_page(html)
+
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out.loc[0, "code"], "446A")
+        self.assertTrue(bool(out.loc[0, "is_stop_high"]))
+
+    def test_case_e_alphanumeric_code_survives_filter_candidate_stocks(self):
         html = """
         <div class="gray-sticky-table">
           <table>
