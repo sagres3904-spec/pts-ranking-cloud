@@ -446,6 +446,16 @@ def fetch_pts_page(page: int) -> str:
     return r.text
 
 
+def _has_stop_high_marker(*texts: str) -> bool:
+    for text in texts:
+        compact = re.sub(r"\s+", "", _safe_text(text))
+        if compact == "":
+            continue
+        if re.search(r"[SＳ](?:ｹ|ケ)?", compact):
+            return True
+    return False
+
+
 def parse_pts_page(html: str) -> pd.DataFrame:
     soup = BeautifulSoup(html, "html.parser")
     table = soup.select_one("div.gray-sticky-table table")
@@ -478,9 +488,10 @@ def parse_pts_page(html: str) -> pd.DataFrame:
 
         volume = _to_int(tds[3].get_text(strip=True))
 
-        # ストップ高表示（S または Sｹ）が「セル内に独立して」出ている時だけ True
+        # Kabutan は騰落率セルを複数 span に分けており、S / Sｹ が数値に密着して出ることがある。
         tds_text = " ".join([td.get_text(" ", strip=True) for td in tds])
-        is_stop_high = bool(re.search(r"(?:^|\s)[SＳ](?:ｹ|ケ)?(?:$|\s)", tds_text))
+        pct_text = tds[2].get_text(" ", strip=True)
+        is_stop_high = _has_stop_high_marker(pct_raw, pct_text, tds_text)
 
         rows.append(
             {
