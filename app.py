@@ -9,7 +9,11 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 
-APP_BUILD_ID = "cloud-stop-high-real-data-20260423"
+APP_BUILD_ID = "sbi-stock-links-20260429"
+SBI_STOCK_DETAIL_URL_BASE = (
+    "https://www.sbisec.co.jp/ETGate/WPLETsiR001Control/"
+    "WPLETsiR001Ilst10/getDetailOfStockPriceJP"
+)
 
 
 # ========= ユーティリティ =========
@@ -26,6 +30,41 @@ def _safe_text(x) -> str:
     if s.lower() == "nan":
         return ""
     return s
+
+
+def _make_sbi_stock_url(code: str) -> str:
+    stock_code = _safe_text(code).upper()
+    if stock_code == "":
+        return ""
+    return (
+        f"{SBI_STOCK_DETAIL_URL_BASE}"
+        f"?OutSide=on&exchange_code=JPN&getFlg=on&stock_sec_code_mul={stock_code}"
+    )
+
+
+def _make_sbi_stock_link_value(code: str, display_text: str) -> str:
+    url = _make_sbi_stock_url(code)
+    if url == "":
+        return ""
+
+    label = _safe_text(display_text)
+    if label == "":
+        label = _safe_text(code).upper()
+    if label == "":
+        return url
+    return f"{url}#sbi_display_name={label}"
+
+
+def _add_sbi_stock_links_for_display(df_in: pd.DataFrame) -> pd.DataFrame:
+    df_out = df_in.copy()
+    if "code" not in df_out.columns or "name" not in df_out.columns:
+        return df_out
+
+    df_out["name"] = df_out.apply(
+        lambda row: _make_sbi_stock_link_value(row.get("code", ""), row.get("name", "")),
+        axis=1,
+    )
+    return df_out
 
 
 def _to_int(text: str) -> Optional[int]:
@@ -764,6 +803,7 @@ if st.button("取得して表示"):
             "開示タイトル3", "PDFリンク3",
         ]
         df_show = df_show.reindex(columns=cols)
+        df_show_display = _add_sbi_stock_links_for_display(df_show)
 
         def _linkcol(colname: str):
             try:
@@ -771,11 +811,18 @@ if st.button("取得して表示"):
             except TypeError:
                 return st.column_config.LinkColumn(colname)
 
+        def _stock_linkcol(colname: str):
+            try:
+                return st.column_config.LinkColumn(colname, display_text=r"#sbi_display_name=(.*)$")
+            except TypeError:
+                return st.column_config.LinkColumn(colname)
+
         st.dataframe(
-            df_show,
+            df_show_display,
             use_container_width=True,
             hide_index=True,
             column_config={
+                "name": _stock_linkcol("企業名"),
                 "PDFリンク1": _linkcol("PDFリンク1"),
                 "PDFリンク2": _linkcol("PDFリンク2"),
                 "PDFリンク3": _linkcol("PDFリンク3"),
