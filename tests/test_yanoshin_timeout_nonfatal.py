@@ -5,6 +5,18 @@ from unittest.mock import patch
 import pandas as pd
 
 
+class FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+        self.status_code = 200
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
 def load_yanoshin_helpers():
     app_path = pathlib.Path(__file__).resolve().parents[1] / "app.py"
     source = app_path.read_text(encoding="utf-8")
@@ -41,6 +53,8 @@ class YanoshinTimeoutNonfatalTest(unittest.TestCase):
         self.assertEqual(err, "timeout")
         self.assertEqual(len(out), len(df_in))
         self.assertEqual(list(out["code"]), ["1111", "2222"])
+        self.assertEqual(int(out.loc[0, "開示件数"]), 0)
+        self.assertEqual(out.loc[0, "PDFリンク1"], "")
 
     def test_case_b_failed_disclosure_attach_adds_empty_columns(self):
         df_in = pd.DataFrame([{"code": "446A0", "name": "英字コード候補"}])
@@ -76,6 +90,64 @@ class YanoshinTimeoutNonfatalTest(unittest.TestCase):
         self.assertEqual(len(out_debug_off), len(df_in))
         self.assertEqual(len(out_debug_on), len(df_in))
         self.assertEqual(list(out_debug_off["code"]), list(out_debug_on["code"]))
+
+    def test_case_d_one_url_timeout_keeps_successful_disclosure_link(self):
+        df_in = pd.DataFrame([{"code": "1111", "name": "候補A", "pct": 10.0, "volume": 1000}])
+        yesterday_items = [
+            {
+                "company_code": "1111",
+                "title": "成功した開示",
+                "document_url": "https://example.com/docs/success.pdf",
+                "pubdate": "2026-05-10 15:00",
+            }
+        ]
+
+        def fake_get(url, timeout=20):
+            if "today.json2" in url:
+                raise self.requests_module.exceptions.ReadTimeout("read timed out")
+            if "yesterday.json2" in url:
+                return FakeResponse({"items": yesterday_items})
+            raise AssertionError(f"unexpected url: {url}")
+
+        with patch.object(self.requests_module, "get", side_effect=fake_get):
+            out, err = self.safe_attach_disclosures(df_in, debug=False)
+
+        self.assertEqual(err, "partial: timeout")
+        self.assertEqual(len(out), len(df_in))
+        self.assertEqual(int(out.loc[0, "開示件数"]), 1)
+        self.assertEqual(out.loc[0, "PDFリンク1"], "https://example.com/docs/success.pdf")
+        self.assertNotEqual(out.loc[0, "PDFリンク1"], "")
+
+    def test_case_e_debug_flag_does_not_change_partial_success_result(self):
+        df_in = pd.DataFrame([{"code": "1111", "name": "候補A", "pct": 10.0, "volume": 1000}])
+        yesterday_items = [
+            {
+                "company_code": "1111",
+                "title": "成功した開示",
+                "document_url": "https://example.com/docs/success.pdf",
+                "pubdate": "2026-05-10 15:00",
+            }
+        ]
+
+        def fake_get(url, timeout=20):
+            if "today.json2" in url:
+                raise self.requests_module.exceptions.ReadTimeout("read timed out")
+            if "yesterday.json2" in url:
+                return FakeResponse({"items": yesterday_items})
+            raise AssertionError(f"unexpected url: {url}")
+
+        with patch.object(self.requests_module, "get", side_effect=fake_get):
+            out_debug_off, err_debug_off = self.safe_attach_disclosures(df_in, debug=False)
+
+        with patch.object(self.requests_module, "get", side_effect=fake_get):
+            with patch.object(self.st_module, "write"), patch.object(self.st_module, "dataframe"):
+                out_debug_on, err_debug_on = self.safe_attach_disclosures(df_in, debug=True)
+
+        self.assertEqual(err_debug_off, "partial: timeout")
+        self.assertEqual(err_debug_on, "partial: timeout")
+        self.assertEqual(len(out_debug_off), len(out_debug_on))
+        self.assertEqual(int(out_debug_off.loc[0, "開示件数"]), int(out_debug_on.loc[0, "開示件数"]))
+        self.assertEqual(out_debug_off.loc[0, "PDFリンク1"], out_debug_on.loc[0, "PDFリンク1"])
 
 
 if __name__ == "__main__":
