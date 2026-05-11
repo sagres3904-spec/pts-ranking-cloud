@@ -9,7 +9,7 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 
-APP_BUILD_ID = "sbi-stock-links-20260429"
+APP_BUILD_ID = "yanoshin-timeout-nonfatal-20260511"
 SBI_STOCK_DETAIL_URL_BASE = (
     "https://www.sbisec.co.jp/ETGate/WPLETsiR001Control/"
     "WPLETsiR001Ilst10/getDetailOfStockPriceJP"
@@ -489,6 +489,41 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     return df_out
 
 
+def _attach_empty_disclosures(df_in: pd.DataFrame) -> pd.DataFrame:
+    df_out = df_in.copy()
+    if "code" in df_out.columns:
+        df_out["code"] = df_out["code"].apply(_normalize_company_code)
+
+    df_out["開示件数"] = 0
+    for i in range(3):
+        df_out[f"開示タイトル{i+1}"] = ""
+        df_out[f"PDFリンク{i+1}"] = ""
+
+    df_out["_開示上位5"] = df_out.apply(lambda _row: [], axis=1)
+    return df_out
+
+
+def _short_yanoshin_error_message(exc: Exception) -> str:
+    if isinstance(exc, requests.exceptions.Timeout):
+        return "timeout"
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return "connection error"
+    if isinstance(exc, requests.exceptions.RequestException):
+        return "request error"
+    return exc.__class__.__name__
+
+
+def safe_attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> Tuple[pd.DataFrame, Optional[str]]:
+    try:
+        return attach_disclosures(df_in, debug=debug), None
+    except requests.exceptions.RequestException as exc:
+        message = _short_yanoshin_error_message(exc)
+        if debug:
+            st.write("【診断】Yanoshin開示取得: 失敗")
+            st.write("【診断】Yanoshin開示取得失敗理由:", message)
+        return _attach_empty_disclosures(df_in), message
+
+
 # ========= Kabutan PTS =========
 
 PTS_URL_TEMPLATE = "https://s.kabutan.jp/warnings/pts_night_price_increase/?page={page}"
@@ -772,7 +807,12 @@ if st.button("取得して表示"):
                     hide_index=True,
                 )
 
-        df2 = attach_disclosures(df2, debug=debug)
+        df2, disclosure_error = safe_attach_disclosures(df2, debug=debug)
+        if disclosure_error is None:
+            if debug:
+                st.write("【診断】Yanoshin開示取得: 成功")
+        else:
+            st.warning("適時開示の取得に失敗しました。PTS一覧のみ表示しています。")
 
         hit = df2[df2["開示件数"] > 0].copy()
         st.write(f"【集計】開示あり: {len(hit)} / 開示なし: {len(df2) - len(hit)}")
