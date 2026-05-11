@@ -9,7 +9,7 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 
-APP_BUILD_ID = "yanoshin-timeout-nonfatal-20260511"
+APP_BUILD_ID = "yanoshin-partial-disclosures-20260511"
 SBI_STOCK_DETAIL_URL_BASE = (
     "https://www.sbisec.co.jp/ETGate/WPLETsiR001Control/"
     "WPLETsiR001Ilst10/getDetailOfStockPriceJP"
@@ -301,18 +301,22 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
                 flat_items.append(item)
         return flat_items
 
-    def _fetch(url: str, source_tag: str) -> Tuple[pd.DataFrame, int, pd.DataFrame]:
-        r = requests.get(url, timeout=20)
-        r.raise_for_status()
-        data = r.json()
+    def _fetch(url: str, source_tag: str) -> Tuple[pd.DataFrame, Optional[int], pd.DataFrame, Optional[str]]:
+        try:
+            r = requests.get(url, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+        except requests.exceptions.RequestException as exc:
+            return _normalize_yanoshin_df(pd.DataFrame(), source_tag=source_tag), None, pd.DataFrame(), _short_yanoshin_error_message(exc)
 
         items = _yanoshin_items_from_json(data)
         raw_df = pd.DataFrame(items)
         normalized_df = _normalize_yanoshin_df(raw_df, source_tag=source_tag)
-        return normalized_df, int(r.status_code), raw_df
+        return normalized_df, int(r.status_code), raw_df, None
 
-    td_today, status_today, raw_today = _fetch(url_today, source_tag="today")
-    td_yesterday, status_yesterday, raw_yesterday = _fetch(url_yesterday, source_tag="yesterday")
+    td_today, status_today, raw_today, error_today = _fetch(url_today, source_tag="today")
+    td_yesterday, status_yesterday, raw_yesterday, error_yesterday = _fetch(url_yesterday, source_tag="yesterday")
+    fetch_errors = [err for err in [error_today, error_yesterday] if err is not None]
     td = pd.concat([td_today, td_yesterday], ignore_index=True)
 
     if len(td) > 0:
@@ -375,6 +379,10 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     if debug:
         st.write("【診断】取得URL:", url_today, url_yesterday)
         st.write("【診断】status code today/yesterday:", status_today, status_yesterday)
+        st.write("【診断】Yanoshin取得成功件数:", int(2 - len(fetch_errors)))
+        st.write("【診断】Yanoshin取得失敗件数:", int(len(fetch_errors)))
+        if len(fetch_errors) > 0:
+            st.write("【診断】Yanoshin取得失敗理由:", ", ".join(fetch_errors))
         st.write("【診断】Yanoshin件数 today:", int(len(td_today)))
         st.write("【診断】Yanoshin件数 yesterday:", int(len(td_yesterday)))
         st.write("【診断】today raw shape:", tuple(raw_today.shape))
@@ -400,9 +408,10 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             st.error(
                 f"【診断】todayが0件超なのに結合後が0件です。空フィルタで{dropped_by_empty_filter}件除外されました。"
             )
-    if len(td_today) > 0 and len(td) == 0:
-        raise RuntimeError(
-            f"Yanoshin normalize failed: today={len(td_today)} > 0 but merged=0. dropped_by_empty_filter={dropped_by_empty_filter}"
+    if debug and len(td_today) > 0 and len(td) == 0:
+        st.write(
+            "【診断】Yanoshin normalize後の有効URLが0件です:",
+            f"today={len(td_today)}, dropped_by_empty_filter={dropped_by_empty_filter}",
         )
 
     if debug and len(raw_today) > 0:
@@ -486,6 +495,16 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
 
     df_out["_開示上位5"] = df_out["code"].apply(_top5)
 
+    pdf_cols = [f"PDFリンク{i+1}" for i in range(3)]
+    attached_url_rows = int(df_out[pdf_cols].apply(lambda row: any(_safe_text(v) != "" for v in row), axis=1).sum())
+    df_out.attrs["yanoshin_fetch_success_count"] = int(2 - len(fetch_errors))
+    df_out.attrs["yanoshin_fetch_failed_count"] = int(len(fetch_errors))
+    df_out.attrs["yanoshin_fetch_errors"] = fetch_errors
+    df_out.attrs["yanoshin_fetched_disclosure_count"] = int(len(td_today) + len(td_yesterday))
+    df_out.attrs["yanoshin_attached_url_rows"] = attached_url_rows
+    if debug:
+        st.write("【診断】Yanoshin attach後 PDFリンクあり行数:", attached_url_rows)
+
     return df_out
 
 
@@ -515,13 +534,37 @@ def _short_yanoshin_error_message(exc: Exception) -> str:
 
 def safe_attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> Tuple[pd.DataFrame, Optional[str]]:
     try:
-        return attach_disclosures(df_in, debug=debug), None
+        df_out = attach_disclosures(df_in, debug=debug)
     except requests.exceptions.RequestException as exc:
         message = _short_yanoshin_error_message(exc)
         if debug:
             st.write("【診断】Yanoshin開示取得: 失敗")
             st.write("【診断】Yanoshin開示取得失敗理由:", message)
         return _attach_empty_disclosures(df_in), message
+
+    failed_count = int(df_out.attrs.get("yanoshin_fetch_failed_count", 0))
+    fetched_count = int(df_out.attrs.get("yanoshin_fetched_disclosure_count", 0))
+    fetch_errors = df_out.attrs.get("yanoshin_fetch_errors", [])
+    reason = ", ".join(dict.fromkeys(fetch_errors)) if len(fetch_errors) > 0 else ""
+
+    if failed_count > 0 and fetched_count > 0:
+        message = f"partial: {reason}" if reason else "partial: request error"
+        if debug:
+            st.write("【診断】Yanoshin開示取得: 一部失敗")
+        return df_out, message
+
+    if failed_count > 0:
+        message = reason if reason else "request error"
+        if debug:
+            st.write("【診断】Yanoshin開示取得: 失敗")
+        return df_out, message
+
+    if fetched_count == 0:
+        if debug:
+            st.write("【診断】Yanoshin開示取得: 0件")
+        return df_out, "no disclosure data"
+
+    return df_out, None
 
 
 # ========= Kabutan PTS =========
@@ -811,6 +854,8 @@ if st.button("取得して表示"):
         if disclosure_error is None:
             if debug:
                 st.write("【診断】Yanoshin開示取得: 成功")
+        elif disclosure_error.startswith("partial:"):
+            st.warning("一部の適時開示取得に失敗しました。取得できた開示のみ表示しています。")
         else:
             st.warning("適時開示の取得に失敗しました。PTS一覧のみ表示しています。")
 
