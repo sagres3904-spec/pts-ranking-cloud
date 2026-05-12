@@ -9,7 +9,7 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 
-APP_BUILD_ID = "yanoshin-partial-disclosures-20260511"
+APP_BUILD_ID = "multiple-disclosures-per-company-20260512"
 SBI_STOCK_DETAIL_URL_BASE = (
     "https://www.sbisec.co.jp/ETGate/WPLETsiR001Control/"
     "WPLETsiR001Ilst10/getDetailOfStockPriceJP"
@@ -567,6 +567,28 @@ def safe_attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> Tuple[p
     return df_out, None
 
 
+RESULT_DISPLAY_COLUMNS = [
+    "code", "name", "pct", "volume",
+    "開示件数",
+    "開示タイトル1", "PDFリンク1",
+    "開示タイトル2", "PDFリンク2",
+    "開示タイトル3", "PDFリンク3",
+]
+
+
+def _prepare_results_display_dataframe(df_in: pd.DataFrame) -> pd.DataFrame:
+    df_show = df_in.copy()
+
+    if "pct" in df_show.columns:
+        df_show["pct"] = df_show["pct"].apply(lambda x: "" if pd.isna(x) else f"{float(x):.2f}")
+    if "volume" in df_show.columns:
+        df_show["volume"] = df_show["volume"].apply(lambda x: "" if pd.isna(x) else f"{int(x):,}")
+    if "開示件数" in df_show.columns:
+        df_show["開示件数"] = df_show["開示件数"].apply(lambda x: "" if pd.isna(x) else str(int(x)))
+
+    return _add_sbi_stock_links_for_display(df_show.reindex(columns=RESULT_DISPLAY_COLUMNS))
+
+
 # ========= Kabutan PTS =========
 
 PTS_URL_TEMPLATE = "https://s.kabutan.jp/warnings/pts_night_price_increase/?page={page}"
@@ -876,19 +898,7 @@ if st.button("取得して表示"):
             st.write("【診断】表示直前ソート確認 head(10):")
             st.dataframe(df_show[["pct", "volume", "is_stop_high"]].head(10), hide_index=True)
 
-        df_show["pct"] = df_show["pct"].apply(lambda x: "" if pd.isna(x) else f"{float(x):.2f}")
-        df_show["volume"] = df_show["volume"].apply(lambda x: "" if pd.isna(x) else f"{int(x):,}")
-        df_show["開示件数"] = df_show["開示件数"].apply(lambda x: "" if pd.isna(x) else str(int(x)))
-
-        cols = [
-            "code", "name", "pct", "volume",
-            "開示件数",
-            "開示タイトル1", "PDFリンク1",
-            "開示タイトル2", "PDFリンク2",
-            "開示タイトル3", "PDFリンク3",
-        ]
-        df_show = df_show.reindex(columns=cols)
-        df_show_display = _add_sbi_stock_links_for_display(df_show)
+        df_show_display = _prepare_results_display_dataframe(df_show)
 
         def _linkcol(colname: str):
             try:
