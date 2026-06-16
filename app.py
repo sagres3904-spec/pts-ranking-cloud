@@ -9,7 +9,7 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 
-APP_BUILD_ID = "multiple-disclosures-per-company-20260512"
+APP_BUILD_ID = "debug-flag-disclosure-side-effect-20260512"
 SBI_STOCK_DETAIL_URL_BASE = (
     "https://www.sbisec.co.jp/ETGate/WPLETsiR001Control/"
     "WPLETsiR001Ilst10/getDetailOfStockPriceJP"
@@ -376,70 +376,30 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     else:
         td["day_tag"] = ""
 
-    if debug:
-        st.write("【診断】取得URL:", url_today, url_yesterday)
-        st.write("【診断】status code today/yesterday:", status_today, status_yesterday)
-        st.write("【診断】Yanoshin取得成功件数:", int(2 - len(fetch_errors)))
-        st.write("【診断】Yanoshin取得失敗件数:", int(len(fetch_errors)))
-        if len(fetch_errors) > 0:
-            st.write("【診断】Yanoshin取得失敗理由:", ", ".join(fetch_errors))
-        st.write("【診断】Yanoshin件数 today:", int(len(td_today)))
-        st.write("【診断】Yanoshin件数 yesterday:", int(len(td_yesterday)))
-        st.write("【診断】today raw shape:", tuple(raw_today.shape))
-        st.write("【診断】today columns:", raw_today.columns.tolist())
-        if list(raw_today.columns) == ["Tdnet"] and len(raw_today) > 0:
-            td0 = raw_today["Tdnet"].iloc[0]
-            st.write("【診断】today Tdnet先頭要素type:", str(type(td0)))
-            st.write("【診断】today Tdnet先頭要素(短縮):", str(td0)[:300])
-        st.write("【診断】yesterday raw shape:", tuple(raw_yesterday.shape))
-        st.write("【診断】yesterday columns:", raw_yesterday.columns.tolist())
-        st.write("【診断】today normalize後 shape:", tuple(td_today.shape))
-        st.write("【診断】today normalize後 columns:", td_today.columns.tolist())
-        st.write("【診断】today codeサンプル10件:", td_today.get("code", pd.Series(dtype=object)).head(10).tolist())
-        st.write("【診断】today urlサンプル3件:", td_today.get("document_url", pd.Series(dtype=object)).head(3).tolist())
-        st.write("【診断】today head(3):")
-        st.dataframe(td_today.head(3))
-        st.write("【診断】yesterday head(3):")
-        st.dataframe(td_yesterday.head(3))
-        st.write("【診断】空フィルタ後の件数:", int(len(td_today) + len(td_yesterday) - dropped_by_empty_filter))
-        st.write("【診断】normalize後の件数:", int(len(td_today) + len(td_yesterday)))
-        st.write("【診断】Yanoshin結合後件数（重複除去後）:", int(len(td)))
-        if len(td_today) > 0 and len(td) == 0:
-            st.error(
-                f"【診断】todayが0件超なのに結合後が0件です。空フィルタで{dropped_by_empty_filter}件除外されました。"
-            )
-    if debug and len(td_today) > 0 and len(td) == 0:
-        st.write(
-            "【診断】Yanoshin normalize後の有効URLが0件です:",
-            f"today={len(td_today)}, dropped_by_empty_filter={dropped_by_empty_filter}",
-        )
-
-    if debug and len(raw_today) > 0:
-        today_code_samples = []
+    today_code_samples = []
+    today_url_samples = []
+    if len(raw_today) > 0:
         for _, r in raw_today.head(10).iterrows():
             it = r.to_dict()
             raw_code = _pick_value(it, "company_code", "code", "CompanyCode", "Company_Code")
             today_code_samples.append(_normalize_code_value(raw_code))
-        today_url_samples = []
         for _, r in raw_today.head(3).iterrows():
             it = r.to_dict()
             today_url_samples.append(_pick_value(it, "document_url", "documentUrl", "pdf_url", "pdfUrl", "url", "Url"))
-        st.write("【診断】today codeサンプル10件(候補キー適用後):", today_code_samples)
-        st.write("【診断】today urlサンプル3件(候補キー適用後):", today_url_samples)
 
-    if debug and len(td_today) > 0:
+    empty_url_count = 0
+    if len(td_today) > 0:
         empty_url_count = int((td_today["document_url"] == "").sum())
-        st.write("【診断】today URL空件数:", empty_url_count)
-        st.write("【診断】today URL有効件数:", int(len(td_today) - empty_url_count))
-        if len(td) > 0:
-            st.write("【診断】pubdateサンプル先頭10:", td["pubdate"].dropna().head(10).tolist())
-            uniq_dates = sorted(
-                set([d for d in td["pub_date_only"].tolist() if isinstance(d, datetime.date)]),
-                reverse=True,
-            )
-            st.write("【診断】pub_date_onlyユニーク（新しい順）:", [str(x) for x in uniq_dates])
-            st.write("【診断】当日とみなす日付:", str(max_date) if max_date else "なし")
-            st.write("【診断】前日とみなす日付:", str(prev_date) if prev_date else "なし")
+
+    pubdate_samples = []
+    uniq_dates_text = []
+    if len(td) > 0:
+        pubdate_samples = td["pubdate"].dropna().head(10).tolist()
+        uniq_dates = sorted(
+            set([d for d in td["pub_date_only"].tolist() if isinstance(d, datetime.date)]),
+            reverse=True,
+        )
+        uniq_dates_text = [str(x) for x in uniq_dates]
 
     def _rank(tag: str) -> int:
         if tag == "当日":
@@ -502,8 +462,83 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     df_out.attrs["yanoshin_fetch_errors"] = fetch_errors
     df_out.attrs["yanoshin_fetched_disclosure_count"] = int(len(td_today) + len(td_yesterday))
     df_out.attrs["yanoshin_attached_url_rows"] = attached_url_rows
+    df_out.attrs["yanoshin_debug_info"] = {
+        "url_today": url_today,
+        "url_yesterday": url_yesterday,
+        "status_today": status_today,
+        "status_yesterday": status_yesterday,
+        "success_count": int(2 - len(fetch_errors)),
+        "failed_count": int(len(fetch_errors)),
+        "fetch_errors": fetch_errors,
+        "td_today_count": int(len(td_today)),
+        "td_yesterday_count": int(len(td_yesterday)),
+        "raw_today_shape": tuple(raw_today.shape),
+        "raw_today_columns": raw_today.columns.tolist(),
+        "raw_yesterday_shape": tuple(raw_yesterday.shape),
+        "raw_yesterday_columns": raw_yesterday.columns.tolist(),
+        "td_today_shape": tuple(td_today.shape),
+        "td_today_columns": td_today.columns.tolist(),
+        "td_today_code_samples": td_today.get("code", pd.Series(dtype=object)).head(10).tolist(),
+        "td_today_url_samples": td_today.get("document_url", pd.Series(dtype=object)).head(3).tolist(),
+        "td_today_head": td_today.head(3),
+        "td_yesterday_head": td_yesterday.head(3),
+        "after_empty_filter_count": int(len(td_today) + len(td_yesterday) - dropped_by_empty_filter),
+        "normalized_count": int(len(td_today) + len(td_yesterday)),
+        "deduped_count": int(len(td)),
+        "dropped_by_empty_filter": int(dropped_by_empty_filter),
+        "today_code_samples": today_code_samples,
+        "today_url_samples": today_url_samples,
+        "today_empty_url_count": empty_url_count,
+        "today_valid_url_count": int(len(td_today) - empty_url_count),
+        "pubdate_samples": pubdate_samples,
+        "unique_pub_dates": uniq_dates_text,
+        "max_date": str(max_date) if max_date else "なし",
+        "prev_date": str(prev_date) if prev_date else "なし",
+        "attached_url_rows": attached_url_rows,
+    }
     if debug:
-        st.write("【診断】Yanoshin attach後 PDFリンクあり行数:", attached_url_rows)
+        info = df_out.attrs["yanoshin_debug_info"]
+        st.write("【診断】取得URL:", info["url_today"], info["url_yesterday"])
+        st.write("【診断】status code today/yesterday:", info["status_today"], info["status_yesterday"])
+        st.write("【診断】Yanoshin取得成功件数:", info["success_count"])
+        st.write("【診断】Yanoshin取得失敗件数:", info["failed_count"])
+        if len(info["fetch_errors"]) > 0:
+            st.write("【診断】Yanoshin取得失敗理由:", ", ".join(info["fetch_errors"]))
+        st.write("【診断】Yanoshin件数 today:", info["td_today_count"])
+        st.write("【診断】Yanoshin件数 yesterday:", info["td_yesterday_count"])
+        st.write("【診断】today raw shape:", info["raw_today_shape"])
+        st.write("【診断】today columns:", info["raw_today_columns"])
+        if list(raw_today.columns) == ["Tdnet"] and len(raw_today) > 0:
+            td0 = raw_today["Tdnet"].iloc[0]
+            st.write("【診断】today Tdnet先頭要素type:", str(type(td0)))
+            st.write("【診断】today Tdnet先頭要素(短縮):", str(td0)[:300])
+        st.write("【診断】yesterday raw shape:", info["raw_yesterday_shape"])
+        st.write("【診断】yesterday columns:", info["raw_yesterday_columns"])
+        st.write("【診断】today normalize後 shape:", info["td_today_shape"])
+        st.write("【診断】today normalize後 columns:", info["td_today_columns"])
+        st.write("【診断】today codeサンプル10件:", info["td_today_code_samples"])
+        st.write("【診断】today urlサンプル3件:", info["td_today_url_samples"])
+        st.write("【診断】today head(3):")
+        st.dataframe(info["td_today_head"])
+        st.write("【診断】yesterday head(3):")
+        st.dataframe(info["td_yesterday_head"])
+        st.write("【診断】空フィルタ後の件数:", info["after_empty_filter_count"])
+        st.write("【診断】normalize後の件数:", info["normalized_count"])
+        st.write("【診断】Yanoshin結合後件数（重複除去後）:", info["deduped_count"])
+        if info["td_today_count"] > 0 and info["deduped_count"] == 0:
+            st.write(
+                "【診断】Yanoshin normalize後の有効URLが0件です:",
+                f"today={info['td_today_count']}, dropped_by_empty_filter={info['dropped_by_empty_filter']}",
+            )
+        st.write("【診断】today codeサンプル10件(候補キー適用後):", info["today_code_samples"])
+        st.write("【診断】today urlサンプル3件(候補キー適用後):", info["today_url_samples"])
+        st.write("【診断】today URL空件数:", info["today_empty_url_count"])
+        st.write("【診断】today URL有効件数:", info["today_valid_url_count"])
+        st.write("【診断】pubdateサンプル先頭10:", info["pubdate_samples"])
+        st.write("【診断】pub_date_onlyユニーク（新しい順）:", info["unique_pub_dates"])
+        st.write("【診断】当日とみなす日付:", info["max_date"])
+        st.write("【診断】前日とみなす日付:", info["prev_date"])
+        st.write("【診断】Yanoshin attach後 PDFリンクあり行数:", info["attached_url_rows"])
 
     return df_out
 
