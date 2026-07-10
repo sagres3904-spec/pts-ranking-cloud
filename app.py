@@ -2,6 +2,7 @@ import re
 import datetime
 from typing import Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit, unquote
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -9,7 +10,7 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 
-APP_BUILD_ID = "signpost-missing-multiple-disclosures-20260710"
+APP_BUILD_ID = "code-backfill-date-window-20260711"
 SBI_STOCK_DETAIL_URL_BASE = (
     "https://www.sbisec.co.jp/ETGate/WPLETsiR001Control/"
     "WPLETsiR001Ilst10/getDetailOfStockPriceJP"
@@ -162,6 +163,44 @@ def _extract_date_from_pubdate(pubdate: str) -> Optional[datetime.date]:
             return None
 
     return None
+
+
+def _determine_disclosure_target_dates(
+    td_today: pd.DataFrame,
+    td_yesterday: pd.DataFrame,
+    jst_today: Optional[datetime.date] = None,
+) -> set:
+    dates = []
+    for df in [td_today, td_yesterday]:
+        if len(df) == 0 or "pubdate" not in df.columns:
+            continue
+        for pubdate in df["pubdate"].tolist():
+            d = _extract_date_from_pubdate(pubdate)
+            if isinstance(d, datetime.date):
+                dates.append(d)
+
+    uniq = sorted(set(dates), reverse=True)
+    if len(uniq) >= 2:
+        return set(uniq[:2])
+    if len(uniq) == 1:
+        return {uniq[0], uniq[0] - datetime.timedelta(days=1)}
+
+    if jst_today is None:
+        jst_today = datetime.datetime.now(ZoneInfo("Asia/Tokyo")).date()
+    return {jst_today, jst_today - datetime.timedelta(days=1)}
+
+
+def _filter_code_backfill_to_target_dates(
+    code_backfill_df: pd.DataFrame,
+    target_dates,
+) -> pd.DataFrame:
+    filtered_df = code_backfill_df.copy()
+    if len(filtered_df) == 0:
+        filtered_df["pub_date_only"] = pd.Series(dtype=object)
+        return filtered_df
+
+    filtered_df["pub_date_only"] = filtered_df["pubdate"].apply(_extract_date_from_pubdate)
+    return filtered_df[filtered_df["pub_date_only"].apply(lambda d: d in target_dates)].copy()
 
 
 def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame:
@@ -319,6 +358,7 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     td_today, status_today, raw_today, error_today = _fetch(url_today, source_tag="today")
     td_yesterday, status_yesterday, raw_yesterday, error_yesterday = _fetch(url_yesterday, source_tag="yesterday")
     fetch_errors = [err for err in [error_today, error_yesterday] if err is not None]
+    target_dates = _determine_disclosure_target_dates(td_today, td_yesterday)
 
     candidate_codes = []
     if "code" in df_in.columns:
@@ -355,10 +395,28 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             code_specific_parts.append(td_code_part)
 
     if len(code_specific_parts) > 0:
-        td_code_specific = pd.concat(code_specific_parts, ignore_index=True)
+        td_code_specific_unfiltered = pd.concat(code_specific_parts, ignore_index=True)
     else:
-        td_code_specific = _normalize_yanoshin_df(pd.DataFrame(), source_tag="code")
+        td_code_specific_unfiltered = _normalize_yanoshin_df(pd.DataFrame(), source_tag="code")
 
+    if len(td_code_specific_unfiltered) > 0:
+        td_code_specific_with_dates = td_code_specific_unfiltered.copy()
+        td_code_specific_with_dates["pub_date_only"] = td_code_specific_with_dates["pubdate"].apply(_extract_date_from_pubdate)
+    else:
+        td_code_specific_with_dates = td_code_specific_unfiltered.copy()
+        td_code_specific_with_dates["pub_date_only"] = pd.Series(dtype=object)
+
+    code_specific_date_parseable_count = int(
+        td_code_specific_with_dates["pub_date_only"].apply(lambda d: isinstance(d, datetime.date)).sum()
+    )
+    td_code_specific = _filter_code_backfill_to_target_dates(td_code_specific_unfiltered, target_dates)
+    code_specific_in_target_date_count = int(len(td_code_specific))
+    code_specific_out_of_target_date_count = int(
+        code_specific_date_parseable_count - code_specific_in_target_date_count
+    )
+    code_specific_unparseable_date_count = int(
+        len(td_code_specific_unfiltered) - code_specific_date_parseable_count
+    )
     td = pd.concat([td_today, td_yesterday, td_code_specific], ignore_index=True)
 
     if len(td) > 0:
@@ -481,7 +539,8 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             day_tag = _safe_text(row.get("day_tag", ""))
             title_text = _decorate_title(day_tag, row.get("title", ""))
             url = _safe_text(row.get("document_url", ""))
-            by_code.setdefault(c, []).append((day_tag, title_text, url))
+            pubdate = _safe_text(row.get("pubdate", ""))
+            by_code.setdefault(c, []).append((day_tag, title_text, url, pubdate))
 
     df_out = df_in.copy()
     df_out["code"] = df_out["code"].apply(_normalize_company_code)
@@ -491,7 +550,7 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     def _get_item(c, i):
         items = by_code.get(c, [])
         if i < len(items):
-            _dt, title_text, url = items[i]
+            _dt, title_text, url, _pubdate = items[i]
             return title_text, url
         return "", ""
 
@@ -501,7 +560,7 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
 
     def _top5(c):
         items = by_code.get(c, [])[:5]
-        return [{"title": t, "url": u} for (_dt, t, u) in items]
+        return [{"title": t, "url": u} for (_dt, t, u, _pubdate) in items]
 
     df_out["_開示上位5"] = df_out["code"].apply(_top5)
 
@@ -518,6 +577,20 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
                 & (td_code_specific_for_debug["document_url"].apply(_safe_text) != "")
             ).sum()
         )
+    birdman_in_candidates = "7063" in set(candidate_codes)
+    birdman_items = by_code.get("7063", [])
+    birdman_pdf_links = [birdman_items[i][2] if i < len(birdman_items) else "" for i in range(3)]
+    birdman_attached_pubdates = [item[3] for item in birdman_items]
+    birdman_code_specific_raw_count = 0
+    birdman_code_specific_filtered_count = 0
+    if len(td_code_specific_unfiltered) > 0:
+        birdman_raw_df = td_code_specific_unfiltered.copy()
+        birdman_raw_df["code"] = birdman_raw_df["code"].apply(_normalize_company_code)
+        birdman_code_specific_raw_count = int((birdman_raw_df["code"] == "7063").sum())
+    if len(td_code_specific) > 0:
+        birdman_filtered_df = td_code_specific.copy()
+        birdman_filtered_df["code"] = birdman_filtered_df["code"].apply(_normalize_company_code)
+        birdman_code_specific_filtered_count = int((birdman_filtered_df["code"] == "7063").sum())
     df_out.attrs["yanoshin_fetch_success_count"] = int(2 - len(fetch_errors))
     df_out.attrs["yanoshin_fetch_failed_count"] = int(len(fetch_errors))
     df_out.attrs["yanoshin_fetch_errors"] = fetch_errors
@@ -534,9 +607,15 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         "fetch_errors": fetch_errors,
         "td_today_count": int(len(td_today)),
         "td_yesterday_count": int(len(td_yesterday)),
+        "target_dates": [str(d) for d in sorted(target_dates, reverse=True)],
         "code_specific_attempt_url_count": int(len(code_specific_urls)),
         "code_specific_count": int(len(td_code_specific)),
         "code_specific_raw_count": int(code_specific_raw_count),
+        "code_specific_normalized_raw_count": int(len(td_code_specific_unfiltered)),
+        "code_specific_date_parseable_count": code_specific_date_parseable_count,
+        "code_specific_in_target_date_count": code_specific_in_target_date_count,
+        "code_specific_out_of_target_date_count": code_specific_out_of_target_date_count,
+        "code_specific_unparseable_date_count": code_specific_unparseable_date_count,
         "code_specific_failed_count": int(len(code_specific_errors)),
         "code_specific_errors": code_specific_errors,
         "raw_today_shape": tuple(raw_today.shape),
@@ -567,6 +646,12 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         "signpost_code_specific_count": signpost_code_specific_count,
         "signpost_attached_count": int(len(signpost_items)),
         "signpost_pdf_links": signpost_pdf_links,
+        "birdman_in_candidates": birdman_in_candidates,
+        "birdman_code_specific_raw_count": birdman_code_specific_raw_count,
+        "birdman_code_specific_filtered_count": birdman_code_specific_filtered_count,
+        "birdman_attached_count": int(len(birdman_items)),
+        "birdman_attached_pubdates": birdman_attached_pubdates,
+        "birdman_pdf_links": birdman_pdf_links,
     }
     if debug:
         info = df_out.attrs["yanoshin_debug_info"]
@@ -578,7 +663,14 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             st.write("【診断】Yanoshin取得失敗理由:", ", ".join(info["fetch_errors"]))
         st.write("【診断】Yanoshin件数 today:", info["td_today_count"])
         st.write("【診断】Yanoshin件数 yesterday:", info["td_yesterday_count"])
+        st.write("【診断】コード指定補完対象日付:", info["target_dates"])
         st.write("【診断】Yanoshinコード指定補完 試行URL数:", info["code_specific_attempt_url_count"])
+        st.write("【診断】Yanoshinコード指定補完 raw件数:", info["code_specific_raw_count"])
+        st.write("【診断】Yanoshinコード指定補完 normalize後raw件数:", info["code_specific_normalized_raw_count"])
+        st.write("【診断】Yanoshinコード指定補完 日付解釈可能件数:", info["code_specific_date_parseable_count"])
+        st.write("【診断】Yanoshinコード指定補完 対象日付内件数:", info["code_specific_in_target_date_count"])
+        st.write("【診断】Yanoshinコード指定補完 対象日付外除外件数:", info["code_specific_out_of_target_date_count"])
+        st.write("【診断】Yanoshinコード指定補完 pubdate解釈不能除外件数:", info["code_specific_unparseable_date_count"])
         st.write("【診断】Yanoshinコード指定補完 取得件数:", info["code_specific_count"])
         st.write("【診断】Yanoshinコード指定補完 失敗件数:", info["code_specific_failed_count"])
         if len(info["code_specific_errors"]) > 0:
@@ -620,6 +712,12 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             st.write("【診断】3996 コード指定補完取得件数:", info["signpost_code_specific_count"])
             st.write("【診断】3996 attach後 開示件数:", info["signpost_attached_count"])
             st.write("【診断】3996 PDFリンク1〜3:", info["signpost_pdf_links"])
+        if info["birdman_in_candidates"]:
+            st.write("【診断】7063 コード指定補完raw件数:", info["birdman_code_specific_raw_count"])
+            st.write("【診断】7063 コード指定補完日付フィルタ後件数:", info["birdman_code_specific_filtered_count"])
+            st.write("【診断】7063 attach後 開示件数:", info["birdman_attached_count"])
+            st.write("【診断】7063 attachされたpubdate一覧:", info["birdman_attached_pubdates"])
+            st.write("【診断】7063 PDFリンク1〜3:", info["birdman_pdf_links"])
         st.write("【診断】Yanoshin attach後 PDFリンクあり行数:", info["attached_url_rows"])
 
     return df_out
