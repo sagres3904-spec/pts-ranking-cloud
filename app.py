@@ -9,7 +9,7 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 
-APP_BUILD_ID = "debug-flag-disclosure-side-effect-20260512"
+APP_BUILD_ID = "signpost-missing-multiple-disclosures-20260710"
 SBI_STOCK_DETAIL_URL_BASE = (
     "https://www.sbisec.co.jp/ETGate/WPLETsiR001Control/"
     "WPLETsiR001Ilst10/getDetailOfStockPriceJP"
@@ -167,6 +167,8 @@ def _extract_date_from_pubdate(pubdate: str) -> Optional[datetime.date]:
 def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame:
     url_today = "https://webapi.yanoshin.jp/webapi/tdnet/list/today.json2?limit=2000"
     url_yesterday = "https://webapi.yanoshin.jp/webapi/tdnet/list/yesterday.json2?limit=2000"
+    code_specific_chunk_size = 40
+    code_specific_limit = 300
 
     def _canonicalize_document_url(raw_url) -> str:
         s = _safe_text(raw_url)
@@ -317,7 +319,47 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     td_today, status_today, raw_today, error_today = _fetch(url_today, source_tag="today")
     td_yesterday, status_yesterday, raw_yesterday, error_yesterday = _fetch(url_yesterday, source_tag="yesterday")
     fetch_errors = [err for err in [error_today, error_yesterday] if err is not None]
-    td = pd.concat([td_today, td_yesterday], ignore_index=True)
+
+    candidate_codes = []
+    if "code" in df_in.columns:
+        seen_codes = set()
+        for raw_code in df_in["code"].tolist():
+            code = _normalize_company_code(raw_code)
+            if code != "" and code not in seen_codes:
+                seen_codes.add(code)
+                candidate_codes.append(code)
+
+    def _chunks(values: list, size: int):
+        for i in range(0, len(values), size):
+            yield values[i : i + size]
+
+    code_specific_parts = []
+    code_specific_urls = []
+    code_specific_errors = []
+    code_specific_raw_count = 0
+    for chunk in _chunks(candidate_codes, code_specific_chunk_size):
+        codes_part = "-".join(chunk)
+        url = f"https://webapi.yanoshin.jp/webapi/tdnet/list/{codes_part}.json2?limit={code_specific_limit}"
+        code_specific_urls.append(url)
+        try:
+            td_code_part, _status_code, raw_code_part, error_code = _fetch(url, source_tag="code")
+        except Exception as exc:
+            td_code_part = _normalize_yanoshin_df(pd.DataFrame(), source_tag="code")
+            raw_code_part = pd.DataFrame()
+            error_code = _short_yanoshin_error_message(exc)
+
+        code_specific_raw_count += int(len(raw_code_part))
+        if error_code is not None:
+            code_specific_errors.append(error_code)
+        if len(td_code_part) > 0:
+            code_specific_parts.append(td_code_part)
+
+    if len(code_specific_parts) > 0:
+        td_code_specific = pd.concat(code_specific_parts, ignore_index=True)
+    else:
+        td_code_specific = _normalize_yanoshin_df(pd.DataFrame(), source_tag="code")
+
+    td = pd.concat([td_today, td_yesterday, td_code_specific], ignore_index=True)
 
     if len(td) > 0:
         td["code"] = td["code"].apply(_normalize_company_code)
@@ -336,6 +378,13 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             st.error(f"Yanoshinデータの必須列が不足しています: {missing_cols}")
             raise RuntimeError(f"Yanoshin required columns missing: {missing_cols}")
 
+        if len(td_code_specific) > 0:
+            td_code_specific_for_debug = td_code_specific.copy()
+            td_code_specific_for_debug["code"] = td_code_specific_for_debug["code"].apply(_normalize_company_code)
+            td_code_specific_for_debug["document_url"] = td_code_specific_for_debug["document_url"].apply(_safe_text)
+        else:
+            td_code_specific_for_debug = pd.DataFrame(columns=["code", "document_url"])
+
         before_filter = len(td)
         td = td[(td["code"] != "") & (td["document_url"] != "")].copy()
         after_filter = len(td)
@@ -350,6 +399,7 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             columns=["code", "title", "document_url", "canonical_url", "doc_identity", "pubdate", "pub_date_only"]
         )
         dropped_by_empty_filter = 0
+        td_code_specific_for_debug = pd.DataFrame(columns=["code", "document_url"])
 
     # 返ってきた中で最新の日付＝当日、次点＝前日
     max_date = None
@@ -457,14 +507,26 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
 
     pdf_cols = [f"PDFリンク{i+1}" for i in range(3)]
     attached_url_rows = int(df_out[pdf_cols].apply(lambda row: any(_safe_text(v) != "" for v in row), axis=1).sum())
+    signpost_in_candidates = "3996" in set(candidate_codes)
+    signpost_items = by_code.get("3996", [])
+    signpost_pdf_links = [signpost_items[i][2] if i < len(signpost_items) else "" for i in range(3)]
+    signpost_code_specific_count = 0
+    if len(td_code_specific_for_debug) > 0:
+        signpost_code_specific_count = int(
+            (
+                (td_code_specific_for_debug["code"] == "3996")
+                & (td_code_specific_for_debug["document_url"].apply(_safe_text) != "")
+            ).sum()
+        )
     df_out.attrs["yanoshin_fetch_success_count"] = int(2 - len(fetch_errors))
     df_out.attrs["yanoshin_fetch_failed_count"] = int(len(fetch_errors))
     df_out.attrs["yanoshin_fetch_errors"] = fetch_errors
-    df_out.attrs["yanoshin_fetched_disclosure_count"] = int(len(td_today) + len(td_yesterday))
+    df_out.attrs["yanoshin_fetched_disclosure_count"] = int(len(td_today) + len(td_yesterday) + len(td_code_specific))
     df_out.attrs["yanoshin_attached_url_rows"] = attached_url_rows
     df_out.attrs["yanoshin_debug_info"] = {
         "url_today": url_today,
         "url_yesterday": url_yesterday,
+        "code_specific_urls": code_specific_urls,
         "status_today": status_today,
         "status_yesterday": status_yesterday,
         "success_count": int(2 - len(fetch_errors)),
@@ -472,6 +534,11 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         "fetch_errors": fetch_errors,
         "td_today_count": int(len(td_today)),
         "td_yesterday_count": int(len(td_yesterday)),
+        "code_specific_attempt_url_count": int(len(code_specific_urls)),
+        "code_specific_count": int(len(td_code_specific)),
+        "code_specific_raw_count": int(code_specific_raw_count),
+        "code_specific_failed_count": int(len(code_specific_errors)),
+        "code_specific_errors": code_specific_errors,
         "raw_today_shape": tuple(raw_today.shape),
         "raw_today_columns": raw_today.columns.tolist(),
         "raw_yesterday_shape": tuple(raw_yesterday.shape),
@@ -482,8 +549,9 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         "td_today_url_samples": td_today.get("document_url", pd.Series(dtype=object)).head(3).tolist(),
         "td_today_head": td_today.head(3),
         "td_yesterday_head": td_yesterday.head(3),
-        "after_empty_filter_count": int(len(td_today) + len(td_yesterday) - dropped_by_empty_filter),
-        "normalized_count": int(len(td_today) + len(td_yesterday)),
+        "after_empty_filter_count": int(len(td_today) + len(td_yesterday) + len(td_code_specific) - dropped_by_empty_filter),
+        "normalized_count": int(len(td_today) + len(td_yesterday) + len(td_code_specific)),
+        "combined_before_dedupe_count": int(after_filter if len(td) > 0 else 0),
         "deduped_count": int(len(td)),
         "dropped_by_empty_filter": int(dropped_by_empty_filter),
         "today_code_samples": today_code_samples,
@@ -495,6 +563,10 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         "max_date": str(max_date) if max_date else "なし",
         "prev_date": str(prev_date) if prev_date else "なし",
         "attached_url_rows": attached_url_rows,
+        "signpost_in_candidates": signpost_in_candidates,
+        "signpost_code_specific_count": signpost_code_specific_count,
+        "signpost_attached_count": int(len(signpost_items)),
+        "signpost_pdf_links": signpost_pdf_links,
     }
     if debug:
         info = df_out.attrs["yanoshin_debug_info"]
@@ -506,6 +578,11 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             st.write("【診断】Yanoshin取得失敗理由:", ", ".join(info["fetch_errors"]))
         st.write("【診断】Yanoshin件数 today:", info["td_today_count"])
         st.write("【診断】Yanoshin件数 yesterday:", info["td_yesterday_count"])
+        st.write("【診断】Yanoshinコード指定補完 試行URL数:", info["code_specific_attempt_url_count"])
+        st.write("【診断】Yanoshinコード指定補完 取得件数:", info["code_specific_count"])
+        st.write("【診断】Yanoshinコード指定補完 失敗件数:", info["code_specific_failed_count"])
+        if len(info["code_specific_errors"]) > 0:
+            st.write("【診断】Yanoshinコード指定補完 失敗理由:", ", ".join(info["code_specific_errors"]))
         st.write("【診断】today raw shape:", info["raw_today_shape"])
         st.write("【診断】today columns:", info["raw_today_columns"])
         if list(raw_today.columns) == ["Tdnet"] and len(raw_today) > 0:
@@ -524,6 +601,7 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         st.dataframe(info["td_yesterday_head"])
         st.write("【診断】空フィルタ後の件数:", info["after_empty_filter_count"])
         st.write("【診断】normalize後の件数:", info["normalized_count"])
+        st.write("【診断】Yanoshin結合前件数:", info["combined_before_dedupe_count"])
         st.write("【診断】Yanoshin結合後件数（重複除去後）:", info["deduped_count"])
         if info["td_today_count"] > 0 and info["deduped_count"] == 0:
             st.write(
@@ -538,6 +616,10 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         st.write("【診断】pub_date_onlyユニーク（新しい順）:", info["unique_pub_dates"])
         st.write("【診断】当日とみなす日付:", info["max_date"])
         st.write("【診断】前日とみなす日付:", info["prev_date"])
+        if info["signpost_in_candidates"]:
+            st.write("【診断】3996 コード指定補完取得件数:", info["signpost_code_specific_count"])
+            st.write("【診断】3996 attach後 開示件数:", info["signpost_attached_count"])
+            st.write("【診断】3996 PDFリンク1〜3:", info["signpost_pdf_links"])
         st.write("【診断】Yanoshin attach後 PDFリンクあり行数:", info["attached_url_rows"])
 
     return df_out
