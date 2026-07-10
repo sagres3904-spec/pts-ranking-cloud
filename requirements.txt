@@ -1,4 +1,8 @@
-streamlit>=1.32
-pandas>=2.2
-requests>=2.32
-beautifulsoup4>=4.12
+streamlit==1.54.0
+pandas==2.3.3
+numpy==2.2.6
+pyarrow==20.0.0
+protobuf==5.29.5
+altair==5.5.0
+requests==2.34.2
+beautifulsoup4==4.15.0

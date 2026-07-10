@@ -10,7 +10,7 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 
-APP_BUILD_ID = "code-backfill-date-window-20260711"
+APP_BUILD_ID = "cloud-startup-stable-pins-20260711"
 SBI_STOCK_DETAIL_URL_BASE = (
     "https://www.sbisec.co.jp/ETGate/WPLETsiR001Control/"
     "WPLETsiR001Ilst10/getDetailOfStockPriceJP"
