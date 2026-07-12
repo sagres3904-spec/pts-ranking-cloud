@@ -1,7 +1,7 @@
 import re
 import datetime
 from typing import Optional, Tuple
-from urllib.parse import urlsplit, urlunsplit, unquote
+from urllib.parse import urljoin, urlsplit, urlunsplit, unquote
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -10,7 +10,7 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 
-APP_BUILD_ID = "cloud-startup-stable-pins-20260711"
+APP_BUILD_ID = "official-tdnet-fallback-20260712"
 SBI_STOCK_DETAIL_URL_BASE = (
     "https://www.sbisec.co.jp/ETGate/WPLETsiR001Control/"
     "WPLETsiR001Ilst10/getDetailOfStockPriceJP"
@@ -203,6 +203,242 @@ def _filter_code_backfill_to_target_dates(
     return filtered_df[filtered_df["pub_date_only"].apply(lambda d: d in target_dates)].copy()
 
 
+TDNET_OFFICIAL_MAIN_URL = "https://www.release.tdnet.info/inbs/I_main_00.html"
+TDNET_OFFICIAL_USER_AGENT = "pts-ranking-cloud/official-tdnet-fallback"
+TDNET_OFFICIAL_MAX_PAGES = 5
+TDNET_OFFICIAL_COLUMNS = ["code", "source_tag", "title", "document_url", "pubdate"]
+
+
+class _TdnetOfficialFetchError(Exception):
+    def __init__(self, diag: dict):
+        super().__init__("tdnet official fetch failed")
+        self.diag = diag
+
+
+def _empty_tdnet_official_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=TDNET_OFFICIAL_COLUMNS)
+
+
+def _empty_tdnet_official_diag() -> dict:
+    return {
+        "attempt_dates": [],
+        "attempt_urls": [],
+        "page_status_codes": [],
+        "page_raw_rows": [],
+        "normalized_count": 0,
+        "dropped_rows": 0,
+        "errors": [],
+    }
+
+
+def _make_tdnet_official_pubdate(selected_date: datetime.date, time_text: str) -> str:
+    t = _safe_text(time_text)
+    if re.fullmatch(r"\d{1,2}:\d{2}", t):
+        hh, mm = t.split(":", 1)
+        return f"{selected_date.isoformat()} {int(hh):02d}:{mm}:00"
+    return selected_date.isoformat()
+
+
+def _parse_tdnet_official_day_options(main_html: str, base_url: str = TDNET_OFFICIAL_MAIN_URL) -> dict:
+    soup = BeautifulSoup(main_html or "", "html.parser")
+    selector = soup.find("select", {"name": "daylist"}) or soup.find("select", {"id": "day-selector"})
+    if selector is None:
+        raise RuntimeError("tdnet official provider parse error: day selector not found")
+
+    options = {}
+    for opt in selector.find_all("option"):
+        value = _safe_text(opt.get("value"))
+        m = re.search(r"I_list_001_(\d{8})\.html$", value)
+        if not m:
+            continue
+        try:
+            d = datetime.datetime.strptime(m.group(1), "%Y%m%d").date()
+        except Exception:
+            continue
+        options[d] = urljoin(base_url, value)
+    return options
+
+
+def _tdnet_official_same_date_links(soup: BeautifulSoup, selected_date: datetime.date, current_url: str) -> list:
+    ymd = selected_date.strftime("%Y%m%d")
+    links = []
+    for tag in soup.find_all(attrs={"onclick": True}):
+        onclick = _safe_text(tag.get("onclick"))
+        for page, date_text in re.findall(r"I_list_(\d{3})_(\d{8})\.html", onclick):
+            if date_text == ymd:
+                links.append(urljoin(current_url, f"I_list_{page}_{date_text}.html"))
+    return links
+
+
+def _parse_tdnet_official_page(
+    html: str,
+    selected_date: datetime.date,
+    page_url: str,
+) -> Tuple[pd.DataFrame, dict]:
+    diag = {"raw_rows": 0, "dropped_rows": 0, "next_urls": []}
+    soup = BeautifulSoup(html or "", "html.parser")
+
+    table = soup.find(id="main-list-table")
+    info_box = soup.find(id="kaiji-info-box-top")
+    info_text = info_box.get_text(" ", strip=True) if info_box is not None else ""
+
+    if table is None:
+        if "開示された情報はありません" in info_text:
+            return _empty_tdnet_official_df(), diag
+        raise RuntimeError("tdnet official provider parse error: main-list-table not found")
+
+    diag["next_urls"] = _tdnet_official_same_date_links(soup, selected_date, page_url)
+
+    rows = []
+    for tr in table.find_all("tr"):
+        cells = tr.find_all("td")
+        if len(cells) < 4:
+            diag["dropped_rows"] += 1
+            continue
+
+        diag["raw_rows"] += 1
+        time_text = cells[0].get_text(" ", strip=True)
+        code = _normalize_company_code(cells[1].get_text(" ", strip=True))
+        company_name = cells[2].get_text(" ", strip=True)
+
+        pdf_link = None
+        for a in tr.find_all("a", href=True):
+            href = _safe_text(a.get("href"))
+            if href.lower().endswith(".pdf"):
+                pdf_link = a
+                break
+
+        title = ""
+        pdf_url = ""
+        if pdf_link is not None:
+            title = pdf_link.get_text(" ", strip=True)
+            pdf_url = urljoin(page_url, _safe_text(pdf_link.get("href")))
+
+        if code == "" or title == "" or pdf_url == "":
+            diag["dropped_rows"] += 1
+            continue
+
+        rows.append(
+            {
+                "code": code,
+                "source_tag": f"tdnet_official_{selected_date.strftime('%Y%m%d')}",
+                "title": title,
+                "document_url": pdf_url,
+                "pubdate": _make_tdnet_official_pubdate(selected_date, time_text),
+                "company_name": company_name,
+            }
+        )
+
+    if len(rows) == 0:
+        return _empty_tdnet_official_df(), diag
+    return pd.DataFrame(rows).reindex(columns=TDNET_OFFICIAL_COLUMNS + ["company_name"]), diag
+
+
+def _fetch_tdnet_official_page(url: str, timeout=(5, 15), max_retries: int = 1) -> Tuple[str, int]:
+    headers = {"User-Agent": TDNET_OFFICIAL_USER_AGENT}
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.get(url, headers=headers, timeout=timeout)
+            status_code = int(getattr(response, "status_code", 0) or 0)
+            if status_code in [429] or 500 <= status_code <= 599:
+                if attempt < max_retries:
+                    continue
+            response.raise_for_status()
+            apparent = getattr(response, "apparent_encoding", None)
+            if apparent:
+                response.encoding = apparent
+            text = getattr(response, "text", "")
+            return text, status_code
+        except requests.exceptions.RequestException as exc:
+            last_exc = exc
+            if attempt >= max_retries:
+                raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("tdnet official provider fetch failed")
+
+
+def _fetch_tdnet_official_for_dates_uncached(
+    target_dates,
+    max_pages: int = TDNET_OFFICIAL_MAX_PAGES,
+) -> Tuple[pd.DataFrame, dict]:
+    diag = _empty_tdnet_official_diag()
+    target_date_list = sorted(set(target_dates), reverse=True)
+    diag["attempt_dates"] = [str(d) for d in target_date_list]
+
+    try:
+        diag["attempt_urls"].append(TDNET_OFFICIAL_MAIN_URL)
+        main_html, main_status = _fetch_tdnet_official_page(TDNET_OFFICIAL_MAIN_URL)
+        diag["page_status_codes"].append({"url": TDNET_OFFICIAL_MAIN_URL, "status_code": main_status})
+        date_urls = _parse_tdnet_official_day_options(main_html, TDNET_OFFICIAL_MAIN_URL)
+    except Exception as exc:
+        diag["errors"].append(_short_yanoshin_error_message(exc))
+        return _empty_tdnet_official_df(), diag
+
+    parts = []
+    for selected_date in target_date_list:
+        first_url = date_urls.get(selected_date)
+        if first_url is None:
+            diag["errors"].append(f"date not listed: {selected_date}")
+            continue
+
+        queue = [first_url]
+        seen = set()
+        while len(queue) > 0 and len(seen) < max_pages:
+            page_url = queue.pop(0)
+            if page_url in seen:
+                continue
+            seen.add(page_url)
+            diag["attempt_urls"].append(page_url)
+
+            try:
+                html, status_code = _fetch_tdnet_official_page(page_url)
+                diag["page_status_codes"].append({"url": page_url, "status_code": status_code})
+                page_df, page_diag = _parse_tdnet_official_page(html, selected_date, page_url)
+            except Exception as exc:
+                diag["errors"].append(_short_yanoshin_error_message(exc))
+                continue
+
+            diag["page_raw_rows"].append({"url": page_url, "raw_rows": int(page_diag.get("raw_rows", 0))})
+            diag["dropped_rows"] += int(page_diag.get("dropped_rows", 0))
+            if len(page_df) > 0:
+                parts.append(page_df.reindex(columns=TDNET_OFFICIAL_COLUMNS))
+
+            for next_url in page_diag.get("next_urls", []):
+                if next_url not in seen and next_url not in queue:
+                    queue.append(next_url)
+
+    if len(parts) > 0:
+        out = pd.concat(parts, ignore_index=True).reindex(columns=TDNET_OFFICIAL_COLUMNS)
+    else:
+        out = _empty_tdnet_official_df()
+    diag["normalized_count"] = int(len(out))
+    return out, diag
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_tdnet_official_for_dates_cached(target_dates_tuple, max_pages: int = TDNET_OFFICIAL_MAX_PAGES):
+    df, diag = _fetch_tdnet_official_for_dates_uncached(target_dates_tuple, max_pages=max_pages)
+    if len(df) == 0 and len(diag.get("errors", [])) > 0:
+        raise _TdnetOfficialFetchError(diag)
+    return df, diag
+
+
+def _fetch_tdnet_official_for_dates(
+    target_dates,
+    max_pages: int = TDNET_OFFICIAL_MAX_PAGES,
+    use_cache: bool = True,
+) -> Tuple[pd.DataFrame, dict]:
+    target_dates_tuple = tuple(sorted(set(target_dates), reverse=True))
+    if use_cache:
+        try:
+            return _fetch_tdnet_official_for_dates_cached(target_dates_tuple, max_pages=max_pages)
+        except _TdnetOfficialFetchError as exc:
+            return _empty_tdnet_official_df(), exc.diag
+    return _fetch_tdnet_official_for_dates_uncached(target_dates_tuple, max_pages=max_pages)
+
+
 def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame:
     url_today = "https://webapi.yanoshin.jp/webapi/tdnet/list/today.json2?limit=2000"
     url_yesterday = "https://webapi.yanoshin.jp/webapi/tdnet/list/yesterday.json2?limit=2000"
@@ -327,12 +563,12 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
             if items is None:
                 items = data.get("Tdnet")
             if items is None:
-                items = []
+                raise ValueError("json schema mismatch")
         else:
-            items = []
+            raise ValueError("json schema mismatch")
 
         if not isinstance(items, list):
-            items = []
+            raise ValueError("json schema mismatch")
 
         flat_items = []
         for item in items:
@@ -342,21 +578,29 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
                 flat_items.append(item)
         return flat_items
 
-    def _fetch(url: str, source_tag: str) -> Tuple[pd.DataFrame, Optional[int], pd.DataFrame, Optional[str]]:
+    def _fetch_yanoshin_disclosures(url: str, source_tag: str) -> Tuple[pd.DataFrame, Optional[int], pd.DataFrame, Optional[str]]:
         try:
             r = requests.get(url, timeout=20)
             r.raise_for_status()
             data = r.json()
         except requests.exceptions.RequestException as exc:
             return _normalize_yanoshin_df(pd.DataFrame(), source_tag=source_tag), None, pd.DataFrame(), _short_yanoshin_error_message(exc)
+        except ValueError:
+            return _normalize_yanoshin_df(pd.DataFrame(), source_tag=source_tag), None, pd.DataFrame(), "json decode error"
 
-        items = _yanoshin_items_from_json(data)
+        try:
+            items = _yanoshin_items_from_json(data)
+        except ValueError:
+            return _normalize_yanoshin_df(pd.DataFrame(), source_tag=source_tag), int(r.status_code), pd.DataFrame(), "json schema mismatch"
         raw_df = pd.DataFrame(items)
         normalized_df = _normalize_yanoshin_df(raw_df, source_tag=source_tag)
         return normalized_df, int(r.status_code), raw_df, None
 
-    td_today, status_today, raw_today, error_today = _fetch(url_today, source_tag="today")
-    td_yesterday, status_yesterday, raw_yesterday, error_yesterday = _fetch(url_yesterday, source_tag="yesterday")
+    td_today, status_today, raw_today, error_today = _fetch_yanoshin_disclosures(url_today, source_tag="yanoshin_today")
+    td_yesterday, status_yesterday, raw_yesterday, error_yesterday = _fetch_yanoshin_disclosures(
+        url_yesterday,
+        source_tag="yanoshin_yesterday",
+    )
     fetch_errors = [err for err in [error_today, error_yesterday] if err is not None]
     target_dates = _determine_disclosure_target_dates(td_today, td_yesterday)
 
@@ -382,9 +626,12 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         url = f"https://webapi.yanoshin.jp/webapi/tdnet/list/{codes_part}.json2?limit={code_specific_limit}"
         code_specific_urls.append(url)
         try:
-            td_code_part, _status_code, raw_code_part, error_code = _fetch(url, source_tag="code")
+            td_code_part, _status_code, raw_code_part, error_code = _fetch_yanoshin_disclosures(
+                url,
+                source_tag="yanoshin_code_backfill",
+            )
         except Exception as exc:
-            td_code_part = _normalize_yanoshin_df(pd.DataFrame(), source_tag="code")
+            td_code_part = _normalize_yanoshin_df(pd.DataFrame(), source_tag="yanoshin_code_backfill")
             raw_code_part = pd.DataFrame()
             error_code = _short_yanoshin_error_message(exc)
 
@@ -397,7 +644,7 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     if len(code_specific_parts) > 0:
         td_code_specific_unfiltered = pd.concat(code_specific_parts, ignore_index=True)
     else:
-        td_code_specific_unfiltered = _normalize_yanoshin_df(pd.DataFrame(), source_tag="code")
+        td_code_specific_unfiltered = _normalize_yanoshin_df(pd.DataFrame(), source_tag="yanoshin_code_backfill")
 
     if len(td_code_specific_unfiltered) > 0:
         td_code_specific_with_dates = td_code_specific_unfiltered.copy()
@@ -409,6 +656,21 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     code_specific_date_parseable_count = int(
         td_code_specific_with_dates["pub_date_only"].apply(lambda d: isinstance(d, datetime.date)).sum()
     )
+    base_pub_dates = []
+    for base_df in [td_today, td_yesterday]:
+        if len(base_df) > 0 and "pubdate" in base_df.columns:
+            base_pub_dates.extend(
+                [d for d in base_df["pubdate"].apply(_extract_date_from_pubdate).tolist() if isinstance(d, datetime.date)]
+            )
+    if len(base_pub_dates) == 0:
+        code_specific_dates = [
+            d for d in td_code_specific_with_dates["pub_date_only"].tolist() if isinstance(d, datetime.date)
+        ]
+        code_specific_uniq_dates = sorted(set(code_specific_dates), reverse=True)
+        if len(code_specific_uniq_dates) >= 2:
+            target_dates = set(code_specific_uniq_dates[:2])
+        elif len(code_specific_uniq_dates) == 1:
+            target_dates = {code_specific_uniq_dates[0], code_specific_uniq_dates[0] - datetime.timedelta(days=1)}
     td_code_specific = _filter_code_backfill_to_target_dates(td_code_specific_unfiltered, target_dates)
     code_specific_in_target_date_count = int(len(td_code_specific))
     code_specific_out_of_target_date_count = int(
@@ -417,7 +679,32 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     code_specific_unparseable_date_count = int(
         len(td_code_specific_unfiltered) - code_specific_date_parseable_count
     )
-    td = pd.concat([td_today, td_yesterday, td_code_specific], ignore_index=True)
+    yanoshin_parts = [td_today, td_yesterday, td_code_specific]
+    td_yanoshin_combined = pd.concat(yanoshin_parts, ignore_index=True)
+    if len(td_yanoshin_combined) > 0:
+        td_yanoshin_valid = td_yanoshin_combined.copy()
+        td_yanoshin_valid["code"] = td_yanoshin_valid["code"].apply(_normalize_company_code)
+        td_yanoshin_valid["document_url"] = td_yanoshin_valid["document_url"].apply(_safe_text)
+        yanoshin_valid_count = int(
+            ((td_yanoshin_valid["code"] != "") & (td_yanoshin_valid["document_url"] != "")).sum()
+        )
+    else:
+        yanoshin_valid_count = 0
+
+    fallback_reasons = []
+    if len(fetch_errors) > 0:
+        fallback_reasons.extend(fetch_errors)
+    if len(code_specific_errors) > 0:
+        fallback_reasons.extend([f"code backfill: {err}" for err in code_specific_errors])
+    if yanoshin_valid_count == 0:
+        fallback_reasons.append("yanoshin valid disclosure count is zero")
+
+    tdnet_official = _empty_tdnet_official_df()
+    tdnet_official_diag = _empty_tdnet_official_diag()
+    if len(fallback_reasons) > 0:
+        tdnet_official, tdnet_official_diag = _fetch_tdnet_official_for_dates(target_dates)
+
+    td = pd.concat([td_today, td_yesterday, td_code_specific, tdnet_official], ignore_index=True)
 
     if len(td) > 0:
         td["code"] = td["code"].apply(_normalize_company_code)
@@ -458,6 +745,16 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         )
         dropped_by_empty_filter = 0
         td_code_specific_for_debug = pd.DataFrame(columns=["code", "document_url"])
+
+    tdnet_official_count = int(len(tdnet_official))
+    if yanoshin_valid_count > 0 and tdnet_official_count > 0:
+        disclosure_provider = "mixed"
+    elif tdnet_official_count > 0:
+        disclosure_provider = "tdnet_official"
+    elif yanoshin_valid_count > 0:
+        disclosure_provider = "yanoshin"
+    else:
+        disclosure_provider = "none"
 
     # 返ってきた中で最新の日付＝当日、次点＝前日
     max_date = None
@@ -596,10 +893,16 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     df_out.attrs["yanoshin_fetch_errors"] = fetch_errors
     df_out.attrs["yanoshin_fetched_disclosure_count"] = int(len(td_today) + len(td_yesterday) + len(td_code_specific))
     df_out.attrs["yanoshin_attached_url_rows"] = attached_url_rows
+    df_out.attrs["disclosure_provider"] = disclosure_provider
+    df_out.attrs["disclosure_fallback_reasons"] = fallback_reasons
+    df_out.attrs["tdnet_official_count"] = tdnet_official_count
+    df_out.attrs["tdnet_official_diag"] = tdnet_official_diag
     df_out.attrs["yanoshin_debug_info"] = {
         "url_today": url_today,
         "url_yesterday": url_yesterday,
         "code_specific_urls": code_specific_urls,
+        "disclosure_provider": disclosure_provider,
+        "fallback_reasons": fallback_reasons,
         "status_today": status_today,
         "status_yesterday": status_yesterday,
         "success_count": int(2 - len(fetch_errors)),
@@ -618,6 +921,16 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         "code_specific_unparseable_date_count": code_specific_unparseable_date_count,
         "code_specific_failed_count": int(len(code_specific_errors)),
         "code_specific_errors": code_specific_errors,
+        "yanoshin_success_url_count": int(2 - len(fetch_errors) + len(code_specific_urls) - len(code_specific_errors)),
+        "yanoshin_failed_url_count": int(len(fetch_errors) + len(code_specific_errors)),
+        "yanoshin_valid_count": yanoshin_valid_count,
+        "tdnet_official_attempt_dates": tdnet_official_diag.get("attempt_dates", []),
+        "tdnet_official_attempt_urls": tdnet_official_diag.get("attempt_urls", []),
+        "tdnet_official_status_codes": tdnet_official_diag.get("page_status_codes", []),
+        "tdnet_official_raw_rows": tdnet_official_diag.get("page_raw_rows", []),
+        "tdnet_official_normalized_count": tdnet_official_count,
+        "tdnet_official_dropped_rows": int(tdnet_official_diag.get("dropped_rows", 0)),
+        "tdnet_official_errors": tdnet_official_diag.get("errors", []),
         "raw_today_shape": tuple(raw_today.shape),
         "raw_today_columns": raw_today.columns.tolist(),
         "raw_yesterday_shape": tuple(raw_yesterday.shape),
@@ -628,10 +941,12 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
         "td_today_url_samples": td_today.get("document_url", pd.Series(dtype=object)).head(3).tolist(),
         "td_today_head": td_today.head(3),
         "td_yesterday_head": td_yesterday.head(3),
-        "after_empty_filter_count": int(len(td_today) + len(td_yesterday) + len(td_code_specific) - dropped_by_empty_filter),
-        "normalized_count": int(len(td_today) + len(td_yesterday) + len(td_code_specific)),
+        "after_empty_filter_count": int(after_filter if len(td) > 0 else 0),
+        "normalized_count": int(len(td_today) + len(td_yesterday) + len(td_code_specific) + len(tdnet_official)),
         "combined_before_dedupe_count": int(after_filter if len(td) > 0 else 0),
         "deduped_count": int(len(td)),
+        "provider_combined_before_dedupe_count": int(after_filter if len(td) > 0 else 0),
+        "provider_dedupe_after_count": int(len(td)),
         "dropped_by_empty_filter": int(dropped_by_empty_filter),
         "today_code_samples": today_code_samples,
         "today_url_samples": today_url_samples,
@@ -655,6 +970,21 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     }
     if debug:
         info = df_out.attrs["yanoshin_debug_info"]
+        st.write("【診断】disclosure_provider:", info["disclosure_provider"])
+        st.write("【診断】fallback発動理由:", info["fallback_reasons"])
+        st.write("【診断】Yanoshin成功URL数:", info["yanoshin_success_url_count"])
+        st.write("【診断】Yanoshin失敗URL数:", info["yanoshin_failed_url_count"])
+        st.write("【診断】Yanoshin normalize後有効件数:", info["yanoshin_valid_count"])
+        st.write("【診断】公式TDnet試行日付:", info["tdnet_official_attempt_dates"])
+        st.write("【診断】公式TDnet試行URL:", info["tdnet_official_attempt_urls"])
+        st.write("【診断】公式TDnet 各ページstatus code:", info["tdnet_official_status_codes"])
+        st.write("【診断】公式TDnet 各ページraw行数:", info["tdnet_official_raw_rows"])
+        st.write("【診断】公式TDnet normalize後件数:", info["tdnet_official_normalized_count"])
+        st.write("【診断】公式TDnet parser除外行数:", info["tdnet_official_dropped_rows"])
+        if len(info["tdnet_official_errors"]) > 0:
+            st.write("【診断】公式TDnet取得/parse失敗理由:", ", ".join(info["tdnet_official_errors"]))
+        st.write("【診断】provider結合前件数:", info["provider_combined_before_dedupe_count"])
+        st.write("【診断】dedupe後件数:", info["provider_dedupe_after_count"])
         st.write("【診断】取得URL:", info["url_today"], info["url_yesterday"])
         st.write("【診断】status code today/yesterday:", info["status_today"], info["status_yesterday"])
         st.write("【診断】Yanoshin取得成功件数:", info["success_count"])
@@ -738,6 +1068,15 @@ def _attach_empty_disclosures(df_in: pd.DataFrame) -> pd.DataFrame:
 
 
 def _short_yanoshin_error_message(exc: Exception) -> str:
+    if isinstance(exc, requests.exceptions.HTTPError):
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        if status_code == 429:
+            return "http 429"
+        if isinstance(status_code, int) and 500 <= status_code <= 599:
+            return f"http {status_code}"
+        if status_code:
+            return f"http {status_code}"
     if isinstance(exc, requests.exceptions.Timeout):
         return "timeout"
     if isinstance(exc, requests.exceptions.ConnectionError):
@@ -760,7 +1099,25 @@ def safe_attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> Tuple[p
     failed_count = int(df_out.attrs.get("yanoshin_fetch_failed_count", 0))
     fetched_count = int(df_out.attrs.get("yanoshin_fetched_disclosure_count", 0))
     fetch_errors = df_out.attrs.get("yanoshin_fetch_errors", [])
+    provider = df_out.attrs.get("disclosure_provider", "yanoshin" if fetched_count > 0 else "none")
+    tdnet_official_count = int(df_out.attrs.get("tdnet_official_count", 0))
+    attached_url_rows = int(df_out.attrs.get("yanoshin_attached_url_rows", 0))
     reason = ", ".join(dict.fromkeys(fetch_errors)) if len(fetch_errors) > 0 else ""
+
+    if provider == "mixed" and tdnet_official_count > 0:
+        if debug:
+            st.write("【診断】適時開示取得: Yanoshin + 公式TDnet")
+        return df_out, "tdnet_official_partial"
+
+    if provider == "tdnet_official" and tdnet_official_count > 0:
+        if debug:
+            st.write("【診断】適時開示取得: 公式TDnet")
+        return df_out, "tdnet_official_all"
+
+    if provider != "none" and attached_url_rows == 0:
+        if debug:
+            st.write("【診断】適時開示取得: 候補銘柄該当なし")
+        return df_out, "disclosures_no_candidate"
 
     if failed_count > 0 and fetched_count > 0:
         message = f"partial: {reason}" if reason else "partial: request error"
@@ -1091,6 +1448,12 @@ if st.button("取得して表示"):
         if disclosure_error is None:
             if debug:
                 st.write("【診断】Yanoshin開示取得: 成功")
+        elif disclosure_error == "tdnet_official_partial":
+            st.warning("Yanoshinの一部取得に失敗したため、公式TDnetの取得結果で補完しています。")
+        elif disclosure_error == "tdnet_official_all":
+            st.warning("Yanoshinが利用できないため、公式TDnetから開示情報を取得しました。")
+        elif disclosure_error == "disclosures_no_candidate":
+            st.info("適時開示は取得できましたが、候補銘柄に紐づく開示はありませんでした。")
         elif disclosure_error.startswith("partial:"):
             st.warning("一部の適時開示取得に失敗しました。取得できた開示のみ表示しています。")
         else:

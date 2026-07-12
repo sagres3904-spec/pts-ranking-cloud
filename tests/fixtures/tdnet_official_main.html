@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head><title>適時開示情報閲覧サービス - 開示情報一覧</title></head>
+<body>
+<form>
+  <select size="1" name="daylist" onchange="pageChange()" id="day-selector">
+    <option value="" selected>選択してください</option>
+    <option value="I_list_001_20260713.html">2026/07/13(月)</option>
+    <option value="I_list_001_20260712.html">2026/07/12(日)</option>
+    <option value="I_list_001_20260710.html">2026/07/10(金)</option>
+    <option value="I_list_001_20260709.html">2026/07/09(木)</option>
+  </select>
+</form>
+<iframe id="main_list" name="main_list"></iframe>
+<script>
+function pageChange() {
+  var dayList = document.getElementById("day-selector");
+  var targetHtml = dayList.value;
+  if (targetHtml) {
+    document.getElementById("main_list").src = targetHtml;
+  }
+}
+</script>
+</body>
+</html>
