@@ -137,6 +137,50 @@ class CodeSpecificDisclosureBackfillTest(unittest.TestCase):
         self.assertEqual(int(out.loc[0, "開示件数"]), 1)
         self.assertEqual(out.loc[0, "PDFリンク2"], "")
 
+    def test_yanoshin_redirect_and_direct_urls_do_not_duplicate_first_disclosure(self):
+        document_ids = [
+            "140120260708589620",
+            "140120260713592176",
+            "140120260713592178",
+        ]
+        titles = ["決算短信", "決算説明資料", "新作ゲーム共同開発"]
+        today_items = [
+            {
+                "company_code": "4199",
+                "title": title,
+                "document_url": (
+                    "https://webapi.yanoshin.jp/rd.php?"
+                    f"https://www.release.tdnet.info/inbs/{document_id}.pdf"
+                ),
+                "pubdate": "2026-07-13 15:30",
+            }
+            for document_id, title in zip(document_ids, titles)
+        ]
+        code_items = [
+            {
+                "company_code": "4199",
+                "title": title,
+                "document_url": f"https://www.release.tdnet.info/inbs/{document_id}.pdf",
+                "pubdate": "2026-07-13 15:30",
+            }
+            for document_id, title in zip(document_ids, titles)
+        ]
+        df_in = pd.DataFrame([{"code": "4199", "name": "ワンダープラネット"}])
+
+        out, _err, _urls = self.run_attach(
+            df_in,
+            today_items,
+            [],
+            {"list/4199.json2": code_items},
+        )
+
+        self.assertEqual(int(out.loc[0, "開示件数"]), 3)
+        pdf_links = [out.loc[0, f"PDFリンク{i}"] for i in [1, 2, 3]]
+        self.assertEqual(len(set(pdf_links)), 3)
+        attached_titles = [item["title"] for item in out.loc[0, "_開示上位5"]]
+        for title in titles:
+            self.assertEqual(sum(title in attached_title for attached_title in attached_titles), 1)
+
     def test_same_code_with_different_document_url_stays_multiple(self):
         out, _err, _urls = self.run_attach(
             self.signpost_rows(),
