@@ -10,7 +10,7 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 
-APP_BUILD_ID = "official-tdnet-fallback-20260712"
+APP_BUILD_ID = "yanoshin-redirect-dedupe-20260713"
 SBI_STOCK_DETAIL_URL_BASE = (
     "https://www.sbisec.co.jp/ETGate/WPLETsiR001Control/"
     "WPLETsiR001Ilst10/getDetailOfStockPriceJP"
@@ -445,8 +445,34 @@ def attach_disclosures(df_in: pd.DataFrame, debug: bool = False) -> pd.DataFrame
     code_specific_chunk_size = 40
     code_specific_limit = 300
 
-    def _canonicalize_document_url(raw_url) -> str:
+    def _unwrap_yanoshin_document_redirect(raw_url) -> str:
         s = _safe_text(raw_url)
+        if s == "":
+            return ""
+
+        try:
+            parts = urlsplit(s)
+        except Exception:
+            return s
+
+        if parts.netloc.lower() != "webapi.yanoshin.jp" or parts.path.rstrip("/").lower() != "/rd.php":
+            return s
+
+        redirect_query = unquote(parts.query).strip()
+        candidates = [redirect_query]
+        candidates.extend(
+            part.split("=", 1)[1]
+            for part in redirect_query.split("&")
+            if "=" in part
+        )
+        for candidate in candidates:
+            target = unquote(candidate).strip()
+            if re.match(r"^https?://", target, flags=re.IGNORECASE):
+                return target
+        return s
+
+    def _canonicalize_document_url(raw_url) -> str:
+        s = _unwrap_yanoshin_document_redirect(raw_url)
         if s == "":
             return ""
 
